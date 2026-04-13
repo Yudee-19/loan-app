@@ -94,6 +94,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
                 if (settings?.pin_hash) {
                     set({ pinRequired: true });
                 }
+
+                // 3. Sync notifications on this device.
+                //    Ensures all unpaid payments have local reminders scheduled,
+                //    even if the loan was created on a different device.
+                if (settings?.notification_enabled) {
+                    const { useLoanStore } = require("@/stores/loanStore");
+                    await useLoanStore
+                        .getState()
+                        .rescheduleAllNotifications(
+                            settings.reminder_days_before ?? 1
+                        );
+                }
             }
         } finally {
             set({ loading: false });
@@ -124,6 +136,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         const { settings } = get();
         if (settings?.pin_hash) {
             set({ pinRequired: true });
+        }
+
+        // Sync notifications on this device for all existing unpaid payments
+        if (settings?.notification_enabled) {
+            const { useLoanStore } = require("@/stores/loanStore");
+            await useLoanStore
+                .getState()
+                .rescheduleAllNotifications(
+                    settings.reminder_days_before ?? 1
+                );
         }
     },
 
