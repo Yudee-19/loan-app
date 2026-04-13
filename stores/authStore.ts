@@ -221,6 +221,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         const { user, settings } = get();
         if (!user) return;
 
+        const oldReminderDays = settings?.reminder_days_before ?? 1;
+
         const { error } = await supabase.from("user_settings").upsert({
             user_id: user.id,
             pin_hash: settings?.pin_hash ?? null,
@@ -231,5 +233,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         if (error) throw error;
 
         await get().fetchSettings();
+
+        // If reminder window changed, reschedule every pending notification.
+        // Import the loan store lazily to avoid circular dependency.
+        if (enabled && reminderDays !== oldReminderDays) {
+            const { useLoanStore } = require("@/stores/loanStore");
+            await useLoanStore.getState().rescheduleAllNotifications(reminderDays);
+        }
     },
 }));

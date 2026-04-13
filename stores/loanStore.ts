@@ -66,6 +66,8 @@ interface LoanState {
   markPaymentPaid: (paymentId: string) => Promise<void>;
   /** Unmark a payment (set back to unpaid). */
   markPaymentUnpaid: (paymentId: string) => Promise<void>;
+  /** Cancel all existing notifications and reschedule with a new reminder window. */
+  rescheduleAllNotifications: (reminderDays: number) => Promise<void>;
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -440,6 +442,73 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
       }
     } finally {
       set({ actionLoading: false });
+    }
+  },
+
+  // ── Reschedule All Notifications ─────────────────────────────────────────
+  // Called when the user changes the "remind X days before" setting.
+  // Cancels every existing notification and reschedules with the new window.
+
+  rescheduleAllNotifications: async (reminderDays) => {
+    try {
+      // 1. Fetch all unpaid payments that have a future due date,
+      //    joined with their parent loan for notification text.
+      const { data: unpaidPayments, error: payErr } = await supabase
+        .from("payments")
+        .select("id, loan_id, due_date, amount, notification_id")
+        .eq("is_paid", false);
+
+      if (payErr) throw payErr;
+      if (!unpaidPayments || unpaidPayments.length === 0) return;
+
+      // 2. Fetch all loans in one query so we can look up type + person_name
+      const loanIds = [...new Set(unpaidPayments.map((p) => p.loan_id))];
+      const { data: loans, error: loanErr } = await supabase
+        .from("loans")
+        .select("id, type, person_name")
+        .in("id", loanIds);
+
+      if (loanErr) throw loanErr;
+
+      // Build a quick lookup: loanId → { type, person_name }
+      const loanMap = new Map<string, { type: "credit" | "debit"; person_name: string }>();
+      if (loans) {
+        for (const loan of loans) {
+          loanMap.set(loan.id, {
+            type: loan.type as "credit" | "debit",
+            person_name: loan.person_name,
+          });
+        }
+      }
+
+      // 3. Cancel old notifications, schedule new ones, update DB rows
+      for (const payment of unpaidPayments) {
+        // Cancel the existing notification if one was scheduled
+        if (payment.notification_id) {
+          await cancelNotification(payment.notification_id);
+        }
+
+        const loanInfo = loanMap.get(payment.loan_id);
+        if (!loanInfo) continue;
+
+        // Schedule a new notification with the updated reminder window
+        const newNotifId = await schedulePaymentReminder({
+          paymentId: payment.id,
+          loanType: loanInfo.type,
+          personName: loanInfo.person_name,
+          amount: payment.amount,
+          dueDate: parseISO(payment.due_date),
+          reminderDaysBefore: reminderDays,
+        });
+
+        // Persist the new notification ID (or null if date was in the past)
+        await supabase
+          .from("payments")
+          .update({ notification_id: newNotifId })
+          .eq("id", payment.id);
+      }
+    } catch (err) {
+      console.error("Failed to reschedule notifications:", err);
     }
   },
 }));
