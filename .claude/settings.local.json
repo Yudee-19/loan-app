@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx expo:*)",
+      "Bash(cd:*)",
+      "Bash(node:*)",
+      "Bash(node -e \"require.resolve\\(''babel-preset-expo''\\)\")",
+      "Bash(grep -E \"\\(^[^/]*$|/index\\\\.\\(d\\\\.ts|js\\)$\\)\")",
+      "Bash(grep -A 100 tabBarIcon? D:Projectsloan-appnode_modules@react-navigationbottom-tabslibtypescriptsrctypes.d.ts)"
+    ]
+  },
+  "enabledPlugins": {
+    "supabase@claude-plugins-official": true
+  }
+}
