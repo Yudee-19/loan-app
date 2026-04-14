@@ -95,20 +95,23 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
                     set({ pinRequired: true });
                 }
 
-                // 3. Sync notifications on this device.
-                //    Ensures all unpaid payments have local reminders scheduled,
-                //    even if the loan was created on a different device.
-                if (settings?.notification_enabled) {
-                    const { useLoanStore } = require("@/stores/loanStore");
-                    await useLoanStore
-                        .getState()
-                        .rescheduleAllNotifications(
-                            settings.reminder_days_before ?? 1
-                        );
-                }
             }
         } finally {
             set({ loading: false });
+        }
+
+        // 3. Sync notifications in the background (fire-and-forget).
+        //    This must run AFTER loading is set to false so it doesn't
+        //    block the splash screen or delay navigation.
+        const { settings } = get();
+        if (settings?.notification_enabled) {
+            const { useLoanStore } = require("@/stores/loanStore");
+            useLoanStore
+                .getState()
+                .rescheduleAllNotifications(settings.reminder_days_before ?? 1)
+                .catch((err: any) =>
+                    console.warn("Background notification sync failed:", err)
+                );
         }
 
         // 3. Listen for future auth state changes (token refresh, sign out, etc.)
@@ -138,13 +141,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             set({ pinRequired: true });
         }
 
-        // Sync notifications on this device for all existing unpaid payments
+        // Sync notifications in the background (don't block login navigation)
         if (settings?.notification_enabled) {
             const { useLoanStore } = require("@/stores/loanStore");
-            await useLoanStore
+            useLoanStore
                 .getState()
-                .rescheduleAllNotifications(
-                    settings.reminder_days_before ?? 1
+                .rescheduleAllNotifications(settings.reminder_days_before ?? 1)
+                .catch((err: any) =>
+                    console.warn("Background notification sync failed:", err)
                 );
         }
     },

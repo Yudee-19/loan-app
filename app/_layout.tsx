@@ -77,6 +77,8 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: Colors.surface },
         }}
       >
+        {/* Index redirect — never visible, just a trampoline */}
+        <Stack.Screen name="index" options={{ headerShown: false }} />
         {/* Auth screens — no header back button */}
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
         {/* Main tab navigator */}
