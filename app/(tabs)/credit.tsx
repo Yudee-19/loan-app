@@ -1,100 +1,67 @@
 /**
  * app/(tabs)/credit.tsx
  *
- * Credit tab — lists all loans the user has TAKEN (user owes money).
+ * Credit tab — loans the user has TAKEN (user owes money).
  *
- * Features:
- * - Pull-to-refresh.
- * - Empty state with CTA.
- * - FAB to add a new credit loan.
- * - Swipeable loan cards (edit / delete).
+ * UX:
+ * - Default landing shows a centered search icon + subtitle.
+ * - Tapping it opens an animated bottom sheet with a search bar
+ *   and the full list of credit loans.
+ * - Tapping a list row navigates to that loan's detail page.
+ * - FAB stays available for adding a new credit loan.
  */
 
-import React, { useCallback, useEffect, useState } from "react";
-import { View, FlatList, RefreshControl } from "react-native";
+import React, { useEffect, useState } from "react";
+import { View, Text, Pressable } from "react-native";
 import { useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
-import LoanCard from "@/components/LoanCard";
-import EmptyState from "@/components/EmptyState";
 import FAB from "@/components/FAB";
+import LoanSearchSheet from "@/components/LoanSearchSheet";
 import { useLoanStore } from "@/stores/loanStore";
 import { Colors } from "@/lib/constants";
-import { supabase } from "@/lib/supabase";
-import type { Payment } from "@/types";
 
 export default function CreditScreen() {
   const router = useRouter();
-  const { creditLoans, loading, fetchLoans, deleteLoan } = useLoanStore();
+  const { creditLoans, fetchLoans } = useLoanStore();
+  const [sheetOpen, setSheetOpen] = useState(false);
 
-  // Map of loanId → earliest unpaid due_date (for the "Next due" label & overdue check)
-  const [nextDueDates, setNextDueDates] = useState<Record<string, string>>({});
-
-  /** Fetch loans + next due dates on mount and pull-to-refresh. */
-  const loadData = useCallback(async () => {
-    await fetchLoans();
-    await fetchNextDueDates();
-  }, []);
-
+  // Fetch on mount so the sheet has data ready when opened
   useEffect(() => {
-    loadData();
+    fetchLoans();
   }, []);
-
-  /** For each credit loan, find the next unpaid payment's due_date. */
-  const fetchNextDueDates = async () => {
-    const { data } = await supabase
-      .from("payments")
-      .select("loan_id, due_date")
-      .eq("is_paid", false)
-      .order("due_date", { ascending: true });
-
-    if (data) {
-      const map: Record<string, string> = {};
-      // First occurrence per loan_id is the nearest unpaid due date
-      for (const row of data as Pick<Payment, "loan_id" | "due_date">[]) {
-        if (!map[row.loan_id]) {
-          map[row.loan_id] = row.due_date;
-        }
-      }
-      setNextDueDates(map);
-    }
-  };
 
   return (
-    <View className="flex-1 bg-surface">
-      <FlatList
-        data={creditLoans}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={{ paddingTop: 12, paddingBottom: 100 }}
-        refreshControl={
-          <RefreshControl
-            refreshing={loading}
-            onRefresh={loadData}
-            tintColor={Colors.credit}
-            colors={[Colors.credit]}
-          />
-        }
-        renderItem={({ item }) => (
-          <LoanCard
-            loan={item}
-            onDelete={deleteLoan}
-            nextDueDate={nextDueDates[item.id] ?? null}
-          />
-        )}
-        // Show empty state when there are no credit loans
-        ListEmptyComponent={
-          !loading ? (
-            <EmptyState
-              message="No credit loans yet"
-              subMessage="Tap the + button to record a loan you've taken"
-              icon="arrow-down-circle-outline"
-              actionLabel="Add Credit Loan"
-              onAction={() => router.push("/loan/add?type=credit")}
-            />
-          ) : null
-        }
+    <View className="flex-1 bg-surface items-center justify-center px-6">
+      {/* ── Centered search trigger ──────────────────────────────────── */}
+      <Pressable
+        onPress={() => setSheetOpen(true)}
+        className="items-center"
+        hitSlop={20}
+      >
+        <View
+          className="rounded-full p-8"
+          style={{ backgroundColor: `${Colors.credit}1A` }}
+        >
+          <Ionicons name="search" size={56} color={Colors.credit} />
+        </View>
+        <Text className="text-navy font-semibold text-lg mt-5">
+          Search credit loans
+        </Text>
+        <Text className="text-muted text-sm mt-1 text-center">
+          Tap to find a loan you've taken
+        </Text>
+      </Pressable>
+
+      {/* ── Search Sheet ─────────────────────────────────────────────── */}
+      <LoanSearchSheet
+        visible={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        loans={creditLoans}
+        type="credit"
       />
 
-      {/* Floating Action Button */}
+      {/* ── Floating Action Button ───────────────────────────────────── */}
       <FAB onPress={() => router.push("/loan/add?type=credit")} />
     </View>
   );

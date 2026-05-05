@@ -15,8 +15,8 @@
 import { create } from "zustand";
 import { supabase } from "@/lib/supabase";
 import {
-  calculateSimpleInterest,
-  generatePaymentSchedule,
+  calculateBulletPayment,
+  generateBulletPayment,
 } from "@/lib/calculations";
 import {
   schedulePaymentReminder,
@@ -149,20 +149,20 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
       if (loanError) throw loanError;
       const loan = loanData as Loan;
 
-      // 2. Calculate EMI and generate the payment schedule
-      const { emi } = calculateSimpleInterest(
+      // 2. Compute the bullet payment total and build a single-row schedule
+      const { totalAmount } = calculateBulletPayment(
         data.principal_amount,
         data.rate_of_interest,
-        data.tenure_months
+        data.tenure_months,
       );
 
-      const schedule = generatePaymentSchedule(
+      const schedule = generateBulletPayment(
         loan.id,
         userId,
         parseISO(data.start_date),
         data.payment_day_of_month,
         data.tenure_months,
-        emi
+        totalAmount,
       );
 
       // 3. Bulk-insert all payment rows
@@ -222,7 +222,9 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
       if (
         data.principal_amount !== undefined ||
         data.rate_of_interest !== undefined ||
-        data.tenure_months !== undefined
+        data.tenure_months !== undefined ||
+        data.start_date !== undefined ||
+        data.payment_day_of_month !== undefined
       ) {
         // Fetch the updated loan for full values
         const { data: freshLoan } = await supabase
@@ -256,7 +258,8 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
             .eq("loan_id", loanId)
             .eq("is_paid", false);
 
-          // Count how many payments are already paid
+          // If the bullet payment hasn't been paid yet, regenerate it.
+          // (Once it's marked paid the loan is `is_completed`; we leave it.)
           const { count } = await supabase
             .from("payments")
             .select("*", { count: "exact", head: true })
@@ -264,45 +267,30 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
             .eq("is_paid", true);
 
           const paidCount = count ?? 0;
-          const remainingMonths = loan.tenure_months - paidCount;
 
-          if (remainingMonths > 0) {
-            // Recalculate EMI for the remaining tenure
-            const { emi } = calculateSimpleInterest(
+          if (paidCount === 0) {
+            // Recompute the bullet payment and build a one-row schedule
+            const { totalAmount } = calculateBulletPayment(
               loan.principal_amount,
               loan.rate_of_interest,
-              loan.tenure_months
+              loan.tenure_months,
             );
 
-            // Generate new schedule starting from where we left off
-            const newSchedule: any[] = [];
-            const startDate = parseISO(loan.start_date);
+            const schedule = generateBulletPayment(
+              loanId,
+              userId,
+              parseISO(loan.start_date),
+              loan.payment_day_of_month,
+              loan.tenure_months,
+              totalAmount,
+            );
 
-            for (let i = 0; i < remainingMonths; i++) {
-              const installmentNum = paidCount + i + 1;
-              const dueDate = new Date(
-                startDate.getFullYear(),
-                startDate.getMonth() + installmentNum,
-                loan.payment_day_of_month
-              );
-
-              newSchedule.push({
-                loan_id: loanId,
-                user_id: userId,
-                installment_number: installmentNum,
-                due_date: dueDate.toISOString().split("T")[0],
-                amount: emi,
-                is_paid: false,
-              });
-            }
-
-            // Insert new payment rows
             const { data: newPayments } = await supabase
               .from("payments")
-              .insert(newSchedule)
+              .insert(schedule)
               .select();
 
-            // Schedule notifications for the new payments
+            // Schedule notification for the new payment
             if (newPayments) {
               for (const payment of newPayments as Payment[]) {
                 const notifId = await schedulePaymentReminder({
@@ -323,18 +311,10 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
               }
             }
 
-            // Update remaining_amount on the loan
-            const newRemaining =
-              loan.principal_amount +
-              (loan.principal_amount *
-                loan.rate_of_interest *
-                loan.tenure_months) /
-                (12 * 100) -
-              loan.total_paid;
-
+            // Sync remaining_amount on the loan row
             await supabase
               .from("loans")
-              .update({ remaining_amount: newRemaining })
+              .update({ remaining_amount: totalAmount - loan.total_paid })
               .eq("id", loanId);
           }
         }

@@ -1,13 +1,18 @@
 /**
  * lib/calculations.ts
  *
- * Pure math helpers for loan interest and EMI calculations.
+ * Math helpers for the bullet-payment loan model.
  *
- * We use **simple interest** (not compound) per the project spec:
- *   Total Interest = P × R × T / (12 × 100)
- *   EMI = (P + Total Interest) / T
+ * Loans repay in a single shot at the end of a fixed window (1, 2, or 3
+ * months). Interest is a flat **per-month** percentage of the principal:
  *
- * where P = principal, R = annual rate (%), T = tenure in months.
+ *   Total Interest = principal × monthlyRate × months / 100
+ *   Total Amount   = principal + Total Interest
+ *
+ * Worked example:
+ *   principal = 500000, monthlyRate = 10, months = 2
+ *   → interest = 500000 × 10 × 2 / 100 = 100000
+ *   → total    = 500000 + 100000       = 600000
  */
 
 import { format } from "date-fns";
@@ -15,82 +20,64 @@ import type { PaymentInsert } from "@/types";
 
 // ─── Interest Calculation ────────────────────────────────────────────────────
 
-export interface InterestResult {
-  /** Total interest over the full tenure */
+export interface BulletPaymentResult {
+  /** Total interest accrued over the full window. */
   totalInterest: number;
-  /** Principal + total interest */
+  /** Principal + total interest — what the borrower repays in one shot. */
   totalAmount: number;
-  /** Equal Monthly Installment */
-  emi: number;
 }
 
 /**
- * Calculate simple interest, total repayable amount, and EMI.
+ * Calculate the single-shot bullet payment due at the end of the window.
  *
- * @param principal     - The original loan amount.
- * @param annualRate    - Annual rate of interest as a percentage (e.g. 12 for 12 %).
- * @param tenureMonths  - Number of monthly installments.
+ * @param principal    - Original loan amount.
+ * @param monthlyRate  - Flat monthly rate as a percentage (e.g. 10 for 10 %).
+ * @param months       - Number of months until repayment (expected 1 | 2 | 3).
  */
-export function calculateSimpleInterest(
+export function calculateBulletPayment(
   principal: number,
-  annualRate: number,
-  tenureMonths: number
-): InterestResult {
-  // Simple interest formula: I = P * R * T / (12 * 100)
-  const totalInterest = (principal * annualRate * tenureMonths) / (12 * 100);
+  monthlyRate: number,
+  months: number,
+): BulletPaymentResult {
+  const totalInterest = (principal * monthlyRate * months) / 100;
   const totalAmount = principal + totalInterest;
-  const emi = totalAmount / tenureMonths;
-
   return {
     totalInterest: Math.round(totalInterest * 100) / 100,
     totalAmount: Math.round(totalAmount * 100) / 100,
-    emi: Math.round(emi * 100) / 100,
   };
 }
 
 // ─── Payment Schedule Generation ─────────────────────────────────────────────
 
 /**
- * Generate the full payment schedule for a loan.
+ * Build the (single-row) payment schedule for a bullet-payment loan.
  *
- * Each payment falls on `paymentDay` of the month, starting from the month
- * after `startDate`.  For example, if the loan starts on 15 Jan with
- * paymentDay = 5, the first EMI is due on 5 Feb.
- *
- * @param loanId       - UUID of the parent loan row.
- * @param userId       - UUID of the owning user (denormalised for RLS).
- * @param startDate    - Loan disbursement date.
- * @param paymentDay   - Day of month for each installment (1–28).
- * @param tenureMonths - Total number of installments.
- * @param emi          - Calculated EMI amount.
+ * The lone payment is due `months` months after `startDate`, on
+ * `paymentDay` of that target month. Caller is responsible for clamping
+ * `paymentDay` to 1–28 (DB constraint).
  */
-export function generatePaymentSchedule(
+export function generateBulletPayment(
   loanId: string,
   userId: string,
   startDate: Date,
   paymentDay: number,
-  tenureMonths: number,
-  emi: number
+  months: number,
+  totalAmount: number,
 ): PaymentInsert[] {
-  const payments: PaymentInsert[] = [];
+  const dueDate = new Date(
+    startDate.getFullYear(),
+    startDate.getMonth() + months,
+    paymentDay,
+  );
 
-  for (let i = 0; i < tenureMonths; i++) {
-    // Month-by-month from the start date, offset by (i + 1)
-    const dueDate = new Date(
-      startDate.getFullYear(),
-      startDate.getMonth() + i + 1,
-      paymentDay
-    );
-
-    payments.push({
+  return [
+    {
       loan_id: loanId,
       user_id: userId,
-      installment_number: i + 1,
+      installment_number: 1,
       due_date: format(dueDate, "yyyy-MM-dd"),
-      amount: emi,
+      amount: totalAmount,
       is_paid: false,
-    });
-  }
-
-  return payments;
+    },
+  ];
 }

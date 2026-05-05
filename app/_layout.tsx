@@ -53,8 +53,8 @@ export default function RootLayout() {
     const inAuthGroup = segments[0] === "(auth)";
 
     if (!user && !inAuthGroup) {
-      // Not logged in → go to login
-      router.replace("/(auth)/login");
+      // Not logged in → go to welcome landing
+      router.replace("/(auth)/welcome");
     } else if (user && pinRequired) {
       // Logged in but PIN required → go to PIN screen
       router.replace("/(auth)/pin");

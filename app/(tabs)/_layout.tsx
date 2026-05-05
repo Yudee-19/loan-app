@@ -47,6 +47,17 @@ export default function TabsLayout() {
         headerRight: renderSettingsButton,
       }}
     >
+      {/* ── Dashboard Tab ──────────────────────────────────────────── */}
+      <Tabs.Screen
+        name="dashboard"
+        options={{
+          title: "Dashboard",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="bar-chart" size={size} color={color} />
+          ),
+        }}
+      />
+
       {/* ── Credit Tab ─────────────────────────────────────────────── */}
       <Tabs.Screen
         name="credit"

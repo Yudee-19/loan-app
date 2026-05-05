@@ -27,7 +27,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { parseISO, isBefore, startOfDay } from "date-fns";
 
 import { formatCurrency, Colors } from "@/lib/constants";
-import { calculateSimpleInterest } from "@/lib/calculations";
+import { calculateBulletPayment } from "@/lib/calculations";
 import type { Loan, LoanStatus } from "@/types";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -68,18 +68,12 @@ export default function LoanCard({ loan, onDelete, nextDueDate }: LoanCardProps)
 
   const status = getLoanStatus(loan, nextDueDate);
 
-  // Calculate EMI for display (same formula used when loan was created)
-  const { emi } = calculateSimpleInterest(
+  // Bullet payment total (principal + flat monthly interest × months)
+  const { totalAmount } = calculateBulletPayment(
     loan.principal_amount,
     loan.rate_of_interest,
-    loan.tenure_months
+    loan.tenure_months,
   );
-
-  // Repayment progress (0 → 1)
-  const totalAmount =
-    loan.principal_amount +
-    (loan.principal_amount * loan.rate_of_interest * loan.tenure_months) /
-      (12 * 100);
   const progress = totalAmount > 0 ? loan.total_paid / totalAmount : 0;
 
   // ── Swipe Actions ────────────────────────────────────────────────────────
@@ -185,13 +179,13 @@ export default function LoanCard({ loan, onDelete, nextDueDate }: LoanCardProps)
           <View>
             <Text className="text-xs text-muted">Rate</Text>
             <Text className="text-sm font-medium text-navy">
-              {loan.rate_of_interest}% p.a.
+              {loan.rate_of_interest}% / mo
             </Text>
           </View>
           <View>
-            <Text className="text-xs text-muted">EMI</Text>
+            <Text className="text-xs text-muted">Total Due</Text>
             <Text className="text-sm font-medium text-navy">
-              {formatCurrency(emi)}
+              {formatCurrency(totalAmount)}
             </Text>
           </View>
         </View>

@@ -41,6 +41,10 @@ export const PIN_LENGTH = 4;
 /** Maximum day-of-month allowed for payment — avoids Feb edge cases. */
 export const MAX_PAYMENT_DAY = 28;
 
+/** Allowed bullet-payment windows in months (used by the Add/Edit form). */
+export const PAYMENT_MONTH_OPTIONS = [1, 2, 3] as const;
+export type PaymentMonths = (typeof PAYMENT_MONTH_OPTIONS)[number];
+
 // ─── Currency Formatter ──────────────────────────────────────────────────────
 
 /**

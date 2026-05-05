@@ -3,12 +3,14 @@
  *
  * Edit loan form — pre-fills current loan data and updates on submit.
  *
- * If the user changes principal, rate, or tenure, the store's `updateLoan`
- * method will:
- * 1. Delete all unpaid payments and cancel their notifications.
- * 2. Recalculate the EMI for the full tenure.
- * 3. Generate new payment rows for the remaining installments.
- * 4. Schedule new notifications.
+ * If the user changes principal, rate, or payment_month, the store's
+ * `updateLoan` method will:
+ * 1. Cancel and delete the existing unpaid bullet payment.
+ * 2. Recompute the bullet total.
+ * 3. Insert a fresh single-row payment schedule.
+ * 4. Reschedule the local notification.
+ *
+ * The hidden `payment_day_of_month` is preserved from the loan record.
  */
 
 import React, { useEffect, useState } from "react";
@@ -26,11 +28,19 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { format, parseISO } from "date-fns";
+import DateTimePicker from "@react-native-community/datetimepicker";
+import { Ionicons } from "@expo/vector-icons";
 
 import { useLoanStore } from "@/stores/loanStore";
 import { useAuthStore } from "@/stores/authStore";
-import { calculateSimpleInterest } from "@/lib/calculations";
-import { Colors, MAX_PAYMENT_DAY, formatCurrency } from "@/lib/constants";
+import { calculateBulletPayment } from "@/lib/calculations";
+import {
+  Colors,
+  MAX_PAYMENT_DAY,
+  PAYMENT_MONTH_OPTIONS,
+  formatCurrency,
+} from "@/lib/constants";
 
 // ─── Validation Schema (mirrors add form) ────────────────────────────────────
 
@@ -47,22 +57,13 @@ const editSchema = z.object({
     .min(1, "Rate is required")
     .transform(Number)
     .pipe(z.number().min(0).max(100, "Rate must be 0–100%")),
-  payment_day_of_month: z
-    .string()
-    .min(1, "Day is required")
-    .transform(Number)
-    .pipe(
-      z
-        .number()
-        .int()
-        .min(1)
-        .max(MAX_PAYMENT_DAY, `Day must be 1–${MAX_PAYMENT_DAY}`)
-    ),
   tenure_months: z
-    .string()
-    .min(1, "Tenure is required")
-    .transform(Number)
-    .pipe(z.number().int().positive("Must be at least 1 month")),
+    .number({ invalid_type_error: "Choose a payment month" })
+    .int()
+    .refine((n) => (PAYMENT_MONTH_OPTIONS as readonly number[]).includes(n), {
+      message: "Choose a payment month",
+    }),
+  start_date: z.date({ invalid_type_error: "Pick a start date" }),
   notes: z.string().optional(),
 });
 
@@ -80,6 +81,7 @@ export default function EditLoanScreen() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // Fetch loan data on mount
   useEffect(() => {
@@ -99,8 +101,8 @@ export default function EditLoanScreen() {
       person_phone: "",
       principal_amount: "" as any,
       rate_of_interest: "" as any,
-      payment_day_of_month: "" as any,
-      tenure_months: "" as any,
+      tenure_months: undefined as any,
+      start_date: new Date(),
       notes: "",
     },
   });
@@ -108,42 +110,59 @@ export default function EditLoanScreen() {
   // Pre-fill form when loan data loads
   useEffect(() => {
     if (currentLoan) {
+      // Legacy loans may have tenure_months outside 1–3; clamp to 1 and
+      // let the user pick a valid value before saving.
+      const tenureClamp = (
+        PAYMENT_MONTH_OPTIONS as readonly number[]
+      ).includes(currentLoan.tenure_months)
+        ? currentLoan.tenure_months
+        : 1;
+
       reset({
         person_name: currentLoan.person_name,
         person_phone: currentLoan.person_phone ?? "",
         principal_amount: String(currentLoan.principal_amount) as any,
         rate_of_interest: String(currentLoan.rate_of_interest) as any,
-        payment_day_of_month: String(currentLoan.payment_day_of_month) as any,
-        tenure_months: String(currentLoan.tenure_months) as any,
+        tenure_months: tenureClamp as any,
+        start_date: parseISO(currentLoan.start_date),
         notes: currentLoan.notes ?? "",
       });
     }
   }, [currentLoan]);
 
-  // Live EMI preview
+  // Live preview
   const watchPrincipal = watch("principal_amount");
   const watchRate = watch("rate_of_interest");
   const watchTenure = watch("tenure_months");
+  const watchStartDate = watch("start_date");
 
   const preview = (() => {
     const p = Number(watchPrincipal) || 0;
     const r = Number(watchRate) || 0;
-    const t = Number(watchTenure) || 0;
-    if (p > 0 && t > 0) return calculateSimpleInterest(p, r, t);
+    const m = Number(watchTenure) || 0;
+    if (p > 0 && m > 0 && watchStartDate) {
+      const result = calculateBulletPayment(p, r, m);
+      const dueDate = new Date(
+        watchStartDate.getFullYear(),
+        watchStartDate.getMonth() + m,
+        Math.min(watchStartDate.getDate(), MAX_PAYMENT_DAY),
+      );
+      return { ...result, dueDate };
+    }
     return null;
   })();
 
   /** Form submission handler. */
   const onSubmit = async (data: EditFormData) => {
-    if (!user || !id) return;
+    if (!user || !id || !currentLoan) return;
     setLoading(true);
     setError(null);
 
     try {
-      const { totalAmount } = calculateSimpleInterest(
+      const { totalAmount } = calculateBulletPayment(
         data.principal_amount,
         data.rate_of_interest,
-        data.tenure_months
+        data.tenure_months,
       );
 
       await updateLoan(
@@ -153,13 +172,18 @@ export default function EditLoanScreen() {
           person_phone: data.person_phone || null,
           principal_amount: data.principal_amount,
           rate_of_interest: data.rate_of_interest,
-          payment_day_of_month: data.payment_day_of_month,
+          // Day-of-month follows the chosen start date (capped at 28)
+          payment_day_of_month: Math.min(
+            data.start_date.getDate(),
+            MAX_PAYMENT_DAY,
+          ),
+          start_date: format(data.start_date, "yyyy-MM-dd"),
           tenure_months: data.tenure_months,
-          remaining_amount: totalAmount,
+          remaining_amount: totalAmount - currentLoan.total_paid,
           notes: data.notes || null,
         },
         user.id,
-        settings?.reminder_days_before ?? 1
+        settings?.reminder_days_before ?? 1,
       );
 
       router.back();
@@ -179,7 +203,7 @@ export default function EditLoanScreen() {
       placeholder?: string;
       keyboardType?: "default" | "numeric" | "phone-pad";
       multiline?: boolean;
-    }
+    },
   ) => (
     <View className="mb-4">
       <Text className="text-sm font-medium text-navy mb-1">{label}</Text>
@@ -243,24 +267,113 @@ export default function EditLoanScreen() {
           placeholder: "e.g. 50000",
           keyboardType: "numeric",
         })}
-        {renderField("rate_of_interest", "Annual Interest Rate (%)", {
-          placeholder: "e.g. 12",
+        {renderField("rate_of_interest", "Monthly Interest Rate (%)", {
+          placeholder: "e.g. 10",
           keyboardType: "numeric",
         })}
-        {renderField("payment_day_of_month", "Payment Day of Month (1–28)", {
-          placeholder: "e.g. 5",
-          keyboardType: "numeric",
-        })}
-        {renderField("tenure_months", "Tenure (months)", {
-          placeholder: "e.g. 12",
-          keyboardType: "numeric",
-        })}
+
+        {/* ── Payment Month Selector ──────────────────────────────────── */}
+        <View className="mb-4">
+          <Text className="text-sm font-medium text-navy mb-1">
+            Payment Month
+          </Text>
+          <Controller
+            control={control}
+            name="tenure_months"
+            render={({ field: { onChange, value } }) => (
+              <View className="flex-row gap-2">
+                {PAYMENT_MONTH_OPTIONS.map((m) => {
+                  const selected = value === m;
+                  return (
+                    <Pressable
+                      key={m}
+                      className={`flex-1 py-3 rounded-xl border items-center ${
+                        selected
+                          ? "bg-teal border-teal"
+                          : "bg-white border-gray-200"
+                      }`}
+                      onPress={() => onChange(m)}
+                    >
+                      <Text
+                        className={`font-semibold ${
+                          selected ? "text-white" : "text-navy"
+                        }`}
+                      >
+                        {m} {m === 1 ? "Month" : "Months"}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          />
+          {errors.tenure_months ? (
+            <Text className="text-overdue text-xs mt-1">
+              {errors.tenure_months?.message as string}
+            </Text>
+          ) : null}
+        </View>
+
+        {/* ── Start Date Picker ───────────────────────────────────────── */}
+        <View className="mb-4">
+          <Text className="text-sm font-medium text-navy mb-1">Start Date</Text>
+          <Controller
+            control={control}
+            name="start_date"
+            render={({ field: { onChange, value } }) => (
+              <>
+                <Pressable
+                  className="bg-white border border-gray-200 rounded-xl px-4 py-3 flex-row items-center justify-between"
+                  onPress={() => setPickerOpen(true)}
+                >
+                  <Text className="text-navy">
+                    {value
+                      ? format(value, "dd MMM yyyy")
+                      : "Pick a start date"}
+                  </Text>
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={Colors.muted}
+                  />
+                </Pressable>
+                {pickerOpen ? (
+                  <DateTimePicker
+                    value={value ?? new Date()}
+                    mode="date"
+                    display={Platform.OS === "ios" ? "spinner" : "default"}
+                    onChange={(event, selected) => {
+                      if (Platform.OS !== "ios") setPickerOpen(false);
+                      if (event.type === "set" && selected) {
+                        onChange(selected);
+                      }
+                    }}
+                  />
+                ) : null}
+                {Platform.OS === "ios" && pickerOpen ? (
+                  <Pressable
+                    className="bg-teal rounded-xl py-2 mt-2 items-center"
+                    onPress={() => setPickerOpen(false)}
+                  >
+                    <Text className="text-white font-medium">Done</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
+          />
+          {errors.start_date ? (
+            <Text className="text-overdue text-xs mt-1">
+              {errors.start_date?.message as string}
+            </Text>
+          ) : null}
+        </View>
+
         {renderField("notes", "Notes (optional)", {
           placeholder: "Any additional details...",
           multiline: true,
         })}
 
-        {/* ── EMI Preview ───────────────────────────────────────────── */}
+        {/* ── Updated Summary ───────────────────────────────────────── */}
         {preview ? (
           <View className="bg-white rounded-xl p-4 mb-6 border border-gray-100">
             <Text className="text-sm font-semibold text-navy mb-2">
@@ -274,14 +387,14 @@ export default function EditLoanScreen() {
             </View>
             <View className="flex-row justify-between mb-1">
               <Text className="text-xs text-muted">Total Repayable</Text>
-              <Text className="text-sm text-navy">
+              <Text className="text-base font-bold text-teal">
                 {formatCurrency(preview.totalAmount)}
               </Text>
             </View>
             <View className="flex-row justify-between">
-              <Text className="text-xs text-muted">Monthly EMI</Text>
-              <Text className="text-base font-bold text-teal">
-                {formatCurrency(preview.emi)}
+              <Text className="text-xs text-muted">Due on</Text>
+              <Text className="text-sm text-navy">
+                {format(preview.dueDate, "dd MMM yyyy")}
               </Text>
             </View>
           </View>

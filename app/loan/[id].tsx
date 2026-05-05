@@ -29,7 +29,8 @@ import { parseISO } from "date-fns";
 import PaymentRow from "@/components/PaymentRow";
 import { useLoanStore } from "@/stores/loanStore";
 import { formatCurrency, Colors } from "@/lib/constants";
-import { calculateSimpleInterest } from "@/lib/calculations";
+import { calculateBulletPayment } from "@/lib/calculations";
+import { format } from "date-fns";
 import type { LoanStatus } from "@/types";
 
 export default function LoanDetailScreen() {
@@ -107,21 +108,25 @@ export default function LoanDetailScreen() {
 
   // ── Derived Values ───────────────────────────────────────────────────────
 
-  const { emi } = calculateSimpleInterest(
+  const { totalAmount } = calculateBulletPayment(
     currentLoan.principal_amount,
     currentLoan.rate_of_interest,
-    currentLoan.tenure_months
+    currentLoan.tenure_months,
   );
 
-  const totalAmount =
-    currentLoan.principal_amount +
-    (currentLoan.principal_amount *
-      currentLoan.rate_of_interest *
-      currentLoan.tenure_months) /
-      (12 * 100);
-
   const progress = totalAmount > 0 ? currentLoan.total_paid / totalAmount : 0;
-  const paidCount = payments.filter((p) => p.is_paid).length;
+
+  // Bullet payment due date — months after start_date on payment_day_of_month.
+  // Falls back to the first unpaid payment row if available (handles legacy
+  // multi-payment loans gracefully).
+  const dueDate = (() => {
+    const start = parseISO(currentLoan.start_date);
+    return new Date(
+      start.getFullYear(),
+      start.getMonth() + currentLoan.tenure_months,
+      currentLoan.payment_day_of_month,
+    );
+  })();
 
   // Determine overall loan status
   const loanStatus: LoanStatus = currentLoan.is_completed
@@ -169,21 +174,22 @@ export default function LoanDetailScreen() {
             </Text>
           </View>
           <View className="w-1/2">
-            <Text className="text-xs text-muted">Interest Rate</Text>
+            <Text className="text-xs text-muted">Monthly Rate</Text>
             <Text className="text-sm font-semibold text-navy">
-              {currentLoan.rate_of_interest}% p.a.
+              {currentLoan.rate_of_interest}%
             </Text>
           </View>
           <View className="w-1/2">
-            <Text className="text-xs text-muted">Monthly EMI</Text>
+            <Text className="text-xs text-muted">Total Repayable</Text>
             <Text className="text-sm font-semibold text-teal">
-              {formatCurrency(emi)}
+              {formatCurrency(totalAmount)}
             </Text>
           </View>
           <View className="w-1/2">
-            <Text className="text-xs text-muted">Tenure</Text>
+            <Text className="text-xs text-muted">Payment Month</Text>
             <Text className="text-sm font-semibold text-navy">
-              {currentLoan.tenure_months} months
+              {currentLoan.tenure_months}{" "}
+              {currentLoan.tenure_months === 1 ? "Month" : "Months"}
             </Text>
           </View>
           <View className="w-1/2">
@@ -197,9 +203,9 @@ export default function LoanDetailScreen() {
             </Text>
           </View>
           <View className="w-1/2">
-            <Text className="text-xs text-muted">Payments</Text>
+            <Text className="text-xs text-muted">Due Date</Text>
             <Text className="text-sm font-semibold text-navy">
-              {paidCount} / {currentLoan.tenure_months}
+              {format(dueDate, "dd MMM yyyy")}
             </Text>
           </View>
         </View>
@@ -253,9 +259,7 @@ export default function LoanDetailScreen() {
       </View>
 
       {/* ── Section Title ──────────────────────────────────────────── */}
-      <Text className="text-lg font-semibold text-navy mb-2">
-        Payment Schedule
-      </Text>
+      <Text className="text-lg font-semibold text-navy mb-2">Repayment</Text>
     </View>
   );
 
