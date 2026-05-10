@@ -67,7 +67,7 @@ export default function LoginScreen() {
       if (needsPin) {
         router.replace("/(auth)/pin");
       } else {
-        router.replace("/(tabs)/credit");
+        router.replace("/(tabs)/dashboard");
       }
     } catch (err: any) {
       setError(err.message ?? "Sign-in failed. Please try again.");

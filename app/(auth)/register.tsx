@@ -65,7 +65,7 @@ export default function RegisterScreen() {
     try {
       await signUp(data.email, data.password);
       // Navigate directly to tabs after successful registration
-      router.replace("/(tabs)/credit");
+      router.replace("/(tabs)/dashboard");
     } catch (err: any) {
       setError(err.message ?? "Registration failed. Please try again.");
     } finally {

@@ -47,6 +47,18 @@ export function calculateBulletPayment(
   };
 }
 
+/**
+ * One month's worth of interest on the principal — used by the
+ * "Interest Paid" loan action.
+ *
+ *   monthlyInterest = principal × monthlyRate / 100
+ *
+ * For principal=100000, rate=10 → 10000.
+ */
+export function monthlyInterest(principal: number, monthlyRate: number): number {
+  return Math.round(((principal * monthlyRate) / 100) * 100) / 100;
+}
+
 // ─── Payment Schedule Generation ─────────────────────────────────────────────
 
 /**

@@ -59,8 +59,8 @@ export default function RootLayout() {
       // Logged in but PIN required → go to PIN screen
       router.replace("/(auth)/pin");
     } else if (user && !pinRequired && inAuthGroup) {
-      // Logged in and PIN cleared → go to main tabs
-      router.replace("/(tabs)/credit");
+      // Logged in and PIN cleared → go to dashboard
+      router.replace("/(tabs)/dashboard");
     }
   }, [user, loading, pinRequired, segments]);
 
@@ -83,6 +83,19 @@ export default function RootLayout() {
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
         {/* Main tab navigator */}
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        {/* Customer screens */}
+        <Stack.Screen
+          name="customer/add"
+          options={{ title: "New Customer", presentation: "modal" }}
+        />
+        <Stack.Screen
+          name="customer/[id]"
+          options={{ title: "Customer" }}
+        />
+        <Stack.Screen
+          name="customer/edit/[id]"
+          options={{ title: "Edit Customer", presentation: "modal" }}
+        />
         {/* Loan detail & forms — presented as stack screens */}
         <Stack.Screen
           name="loan/add"

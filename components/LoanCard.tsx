@@ -34,6 +34,10 @@ import type { Loan, LoanStatus } from "@/types";
 
 interface LoanCardProps {
   loan: Loan;
+  /** The owning customer's name — shown as the card heading. */
+  customerName: string;
+  /** Optional phone number for the tap-to-call icon. */
+  customerPhone?: string | null;
   /** Called when the user confirms deletion via the swipe action. */
   onDelete: (loanId: string) => void;
   /** Optional: next unpaid payment due date (ISO string) for overdue check. */
@@ -62,7 +66,13 @@ const statusColors: Record<LoanStatus, string> = {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function LoanCard({ loan, onDelete, nextDueDate }: LoanCardProps) {
+export default function LoanCard({
+  loan,
+  customerName,
+  customerPhone,
+  onDelete,
+  nextDueDate,
+}: LoanCardProps) {
   const router = useRouter();
   const swipeableRef = useRef<Swipeable>(null);
 
@@ -107,7 +117,7 @@ export default function LoanCard({ loan, onDelete, nextDueDate }: LoanCardProps)
         // Confirm before deleting
         Alert.alert(
           "Delete Loan",
-          `Are you sure you want to delete the loan for ${loan.person_name}? This cannot be undone.`,
+          `Are you sure you want to delete the loan for ${customerName}? This cannot be undone.`,
           [
             { text: "Cancel", style: "cancel" },
             {
@@ -142,15 +152,12 @@ export default function LoanCard({ loan, onDelete, nextDueDate }: LoanCardProps)
         <View className="flex-row justify-between items-center mb-2">
           <View className="flex-row items-center flex-1">
             <Text className="text-lg font-semibold text-navy" numberOfLines={1}>
-              {loan.person_name}
+              {customerName}
             </Text>
-            {/* Tap phone number to call */}
-            {loan.person_phone ? (
+            {customerPhone ? (
               <Pressable
                 className="ml-2"
-                onPress={() =>
-                  Linking.openURL(`tel:${loan.person_phone}`)
-                }
+                onPress={() => Linking.openURL(`tel:${customerPhone}`)}
               >
                 <Ionicons name="call-outline" size={16} color={Colors.teal} />
               </Pressable>

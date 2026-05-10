@@ -28,6 +28,9 @@ interface PaymentRowProps {
   onMarkUnpaid: (paymentId: string) => void;
   /** True while the parent is processing this specific payment. */
   isProcessing?: boolean;
+  /** When true, suppress the action buttons (used on the loan detail screen,
+   * where loan-level actions like Redeem replace per-row marking). */
+  readOnly?: boolean;
 }
 
 // ─── Status Logic ────────────────────────────────────────────────────────────
@@ -58,6 +61,7 @@ export default function PaymentRow({
   onMarkPaid,
   onMarkUnpaid,
   isProcessing,
+  readOnly,
 }: PaymentRowProps) {
   const status = getPaymentStatus(payment);
   const config = statusConfig[status];
@@ -66,7 +70,9 @@ export default function PaymentRow({
   const today = startOfDay(new Date());
   const dueDate = startOfDay(parseISO(payment.due_date));
   const showMarkPaid =
-    !payment.is_paid && (isEqual(dueDate, today) || isBefore(dueDate, today));
+    !readOnly &&
+    !payment.is_paid &&
+    (isEqual(dueDate, today) || isBefore(dueDate, today));
 
   /** Handle the mark-as-paid press with haptic feedback. */
   const handleMarkPaid = () => {
@@ -129,7 +135,7 @@ export default function PaymentRow({
           ) : null}
 
           {/* Undo button for paid payments */}
-          {payment.is_paid ? (
+          {payment.is_paid && !readOnly ? (
             <Pressable
               className="px-3 py-1.5 rounded-lg flex-row items-center border border-muted"
               onPress={() => onMarkUnpaid(payment.id)}

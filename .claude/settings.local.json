@@ -7,7 +7,12 @@
       "Bash(node -e \"require.resolve\\(''babel-preset-expo''\\)\")",
       "Bash(grep -E \"\\(^[^/]*$|/index\\\\.\\(d\\\\.ts|js\\)$\\)\")",
       "Bash(grep -A 100 tabBarIcon? D:Projectsloan-appnode_modules@react-navigationbottom-tabslibtypescriptsrctypes.d.ts)",
-      "Bash(npm list *)"
+      "Bash(npm list *)",
+      "mcp__plugin_supabase_supabase__list_projects",
+      "mcp__plugin_supabase_supabase__list_tables",
+      "mcp__plugin_supabase_supabase__list_migrations",
+      "mcp__plugin_supabase_supabase__list_edge_functions",
+      "mcp__plugin_supabase_supabase__get_advisors"
     ],
     "additionalDirectories": [
       "D:\\Projects\\loan-website"

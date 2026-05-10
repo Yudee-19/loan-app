@@ -1,17 +1,11 @@
 /**
  * app/(tabs)/dashboard.tsx
  *
- * Summary dashboard for the user's loans.
+ * Landing screen after login. Shows a Credit / Debit summary and lets the
+ * admin search for any customer via the persistent header search bar, or
+ * create a new customer via the floating action button.
  *
- * UX:
- *  - Top of the screen has a Credit / Debit segmented selector.
- *  - Until the user picks one, an empty state nudges them to choose.
- *  - Once selected, the screen renders aggregate stats for that type:
- *      • Hero: total outstanding + active loan count
- *      • Stats grid: principal, interest, paid, total repayable
- *      • Health: active / completed / overdue counts
- *      • Overdue banner (if any)
- *      • Upcoming payments (next 30 days, top 5)
+ * Debit is the default selection (matches the new client-first lender flow).
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -27,7 +21,11 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { format, parseISO, startOfDay, isBefore, addDays } from "date-fns";
 
+import CustomerSearchBar from "@/components/CustomerSearchBar";
+import FAB from "@/components/FAB";
+
 import { useLoanStore } from "@/stores/loanStore";
+import { useCustomerStore } from "@/stores/customerStore";
 import { supabase } from "@/lib/supabase";
 import { Colors, formatCurrency } from "@/lib/constants";
 import { calculateBulletPayment } from "@/lib/calculations";
@@ -41,7 +39,7 @@ interface UpcomingPayment {
   loan_id: string;
   due_date: string;
   amount: number;
-  person_name: string;
+  customer_name: string;
   type: LoanType;
 }
 
@@ -50,24 +48,28 @@ interface UpcomingPayment {
 export default function DashboardScreen() {
   const router = useRouter();
   const { creditLoans, debitLoans, fetchLoans } = useLoanStore();
+  const fetchCustomers = useCustomerStore((s) => s.fetchCustomers);
+  const customers = useCustomerStore((s) => s.customers);
 
-  const [selectedType, setSelectedType] = useState<LoanType | null>(null);
+  const [selectedType, setSelectedType] = useState<LoanType>("debit");
   const [upcoming, setUpcoming] = useState<UpcomingPayment[]>([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch loans on mount (cheap if cache is warm)
+  // Bootstrap on mount
   useEffect(() => {
     fetchLoans();
+    fetchCustomers();
   }, []);
 
-  /** Fetch all unpaid payments + their loan info for the upcoming list. */
+  /** Fetch all unpaid payments + their loan + customer name. */
   const fetchUnpaidPayments = async () => {
     setPaymentsLoading(true);
     const { data } = await supabase
       .from("payments")
       .select(
-        "id, loan_id, due_date, amount, loan:loans!inner(person_name, type)",
+        "id, loan_id, due_date, amount, " +
+          "loan:loans!inner(type, customer:customers!inner(name))",
       )
       .eq("is_paid", false)
       .order("due_date", { ascending: true });
@@ -77,7 +79,7 @@ export default function DashboardScreen() {
       loan_id: p.loan_id,
       due_date: p.due_date,
       amount: Number(p.amount),
-      person_name: p.loan?.person_name ?? "—",
+      customer_name: p.loan?.customer?.name ?? "—",
       type: p.loan?.type as LoanType,
     }));
 
@@ -85,22 +87,20 @@ export default function DashboardScreen() {
     setPaymentsLoading(false);
   };
 
-  // Refetch payments whenever the selected type changes (cheap, indexed query)
+  // Refetch payments whenever the selected type changes
   useEffect(() => {
-    if (selectedType) fetchUnpaidPayments();
+    fetchUnpaidPayments();
   }, [selectedType]);
 
-  /** Pull-to-refresh: reload both loans and unpaid payments. */
   const handleRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([fetchLoans(), fetchUnpaidPayments()]);
+    await Promise.all([fetchLoans(), fetchUnpaidPayments(), fetchCustomers()]);
     setRefreshing(false);
   };
 
   // ── Aggregate Stats ──────────────────────────────────────────────────────
 
   const summary = useMemo(() => {
-    if (!selectedType) return null;
     const loans = selectedType === "credit" ? creditLoans : debitLoans;
 
     let totalPrincipal = 0;
@@ -143,9 +143,7 @@ export default function DashboardScreen() {
   const today = startOfDay(new Date());
   const next30 = addDays(today, 30);
 
-  const filteredPayments = selectedType
-    ? upcoming.filter((p) => p.type === selectedType)
-    : [];
+  const filteredPayments = upcoming.filter((p) => p.type === selectedType);
 
   const overduePayments = filteredPayments.filter((p) =>
     isBefore(parseISO(p.due_date), today),
@@ -161,215 +159,266 @@ export default function DashboardScreen() {
   const accent = selectedType === "credit" ? Colors.credit : Colors.debit;
   const isCredit = selectedType === "credit";
 
+  // Loan list for the selected type
+  const allLoans = isCredit ? creditLoans : debitLoans;
+
+  // Customer name lookup keyed by customer_id
+  const customerById = useMemo(() => {
+    const map = new Map<string, (typeof customers)[number]>();
+    for (const c of customers) map.set(c.id, c);
+    return map;
+  }, [customers]);
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <ScrollView
-      className="flex-1 bg-surface"
-      contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={handleRefresh}
-          tintColor={Colors.teal}
-          colors={[Colors.teal]}
-        />
-      }
-    >
-      {/* ── Type Selector ─────────────────────────────────────────────── */}
-      <View
-        className="bg-white rounded-xl p-1.5 mb-4 flex-row"
-        style={{
-          elevation: 1,
-          shadowColor: "#000",
-          shadowOpacity: 0.04,
-          shadowRadius: 4,
-          shadowOffset: { width: 0, height: 1 },
-        }}
+    <View className="flex-1 bg-surface">
+      <ScrollView
+        contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={Colors.teal}
+            colors={[Colors.teal]}
+          />
+        }
       >
-        {(["credit", "debit"] as const).map((t) => {
-          const sel = selectedType === t;
-          const tColor = t === "credit" ? Colors.credit : Colors.debit;
-          return (
-            <Pressable
-              key={t}
-              className="flex-1 py-3 rounded-lg items-center"
-              style={{ backgroundColor: sel ? tColor : "transparent" }}
-              onPress={() => setSelectedType(t)}
-            >
-              <Text
-                className={`font-semibold capitalize ${
-                  sel ? "text-white" : "text-navy"
-                }`}
-              >
-                {t}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+        {/* ── Persistent Customer Search ────────────────────────────────── */}
+        <View className="mb-4">
+          <CustomerSearchBar />
+        </View>
 
-      {/* ── Empty state when nothing is selected ─────────────────────── */}
-      {!selectedType ? (
-        <View className="items-center mt-20">
-          <View className="bg-teal/10 rounded-full p-5">
-            <Ionicons name="bar-chart-outline" size={56} color={Colors.teal} />
-          </View>
-          <Text className="text-navy font-semibold text-lg mt-5">
-            Choose a category
+        {/* ── Type Selector ─────────────────────────────────────────────── */}
+        <View
+          className="bg-white rounded-xl p-1.5 mb-4 flex-row"
+          style={{
+            elevation: 1,
+            shadowColor: "#000",
+            shadowOpacity: 0.04,
+            shadowRadius: 4,
+            shadowOffset: { width: 0, height: 1 },
+          }}
+        >
+          {(["debit", "credit"] as const).map((t) => {
+            const sel = selectedType === t;
+            const tColor = t === "credit" ? Colors.credit : Colors.debit;
+            return (
+              <Pressable
+                key={t}
+                className="flex-1 py-3 rounded-lg items-center"
+                style={{ backgroundColor: sel ? tColor : "transparent" }}
+                onPress={() => setSelectedType(t)}
+              >
+                <Text
+                  className={`font-semibold capitalize ${
+                    sel ? "text-white" : "text-navy"
+                  }`}
+                >
+                  {t}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        {/* ── Hero Card ─────────────────────────────────────────────────── */}
+        <View
+          className="rounded-2xl p-5 mb-4"
+          style={{ backgroundColor: accent }}
+        >
+          <Text className="text-white/80 text-sm">
+            {isCredit ? "You owe" : "Owed to you"}
           </Text>
-          <Text className="text-muted text-sm mt-1 text-center px-8">
-            Pick Credit or Debit above to see a summary of your loans.
+          <Text className="text-white font-bold text-3xl mt-1">
+            {formatCurrency(summary.totalRemaining)}
+          </Text>
+          <Text className="text-white/80 text-xs mt-2">
+            across {summary.active} active{" "}
+            {summary.active === 1 ? "loan" : "loans"}
+            {summary.completed > 0 ? ` · ${summary.completed} completed` : ""}
           </Text>
         </View>
-      ) : null}
 
-      {/* ── Summary Content ──────────────────────────────────────────── */}
-      {selectedType && summary ? (
-        <>
-          {/* Hero Card */}
-          <View
-            className="rounded-2xl p-5 mb-4"
-            style={{ backgroundColor: accent }}
-          >
-            <Text className="text-white/80 text-sm">
-              {isCredit ? "You owe" : "Owed to you"}
-            </Text>
-            <Text className="text-white font-bold text-3xl mt-1">
-              {formatCurrency(summary.totalRemaining)}
-            </Text>
-            <Text className="text-white/80 text-xs mt-2">
-              across {summary.active} active{" "}
-              {summary.active === 1 ? "loan" : "loans"}
-              {summary.completed > 0 ? ` · ${summary.completed} completed` : ""}
-            </Text>
+        {/* ── Stats Grid ────────────────────────────────────────────────── */}
+        <View className="flex-row flex-wrap -mx-1.5 mb-1">
+          <StatCard
+            label="Total Principal"
+            value={summary.totalPrincipal}
+            icon="cash-outline"
+          />
+          <StatCard
+            label="Total Interest"
+            value={summary.totalInterest}
+            icon="trending-up-outline"
+          />
+          <StatCard
+            label={isCredit ? "Paid Off" : "Received"}
+            value={summary.totalPaid}
+            icon="checkmark-done-outline"
+          />
+          <StatCard
+            label="Total Repayable"
+            value={summary.totalRepayable}
+            icon="wallet-outline"
+          />
+        </View>
+
+        {/* ── Health Counts ─────────────────────────────────────────────── */}
+        <View className="bg-white rounded-xl p-4 mt-3 mb-4">
+          <Text className="text-sm font-semibold text-navy mb-3">
+            Loan Health
+          </Text>
+          <View className="flex-row justify-between">
+            <CountChip
+              label="Active"
+              value={summary.active}
+              color={Colors.teal}
+            />
+            <CountChip
+              label="Completed"
+              value={summary.completed}
+              color={Colors.paid}
+            />
+            <CountChip
+              label="Overdue"
+              value={overduePayments.length}
+              color={Colors.overdue}
+            />
           </View>
+        </View>
 
-          {/* Stats Grid */}
-          <View className="flex-row flex-wrap -mx-1.5 mb-1">
-            <StatCard
-              label="Total Principal"
-              value={summary.totalPrincipal}
-              icon="cash-outline"
-            />
-            <StatCard
-              label="Total Interest"
-              value={summary.totalInterest}
-              icon="trending-up-outline"
-            />
-            <StatCard
-              label={isCredit ? "Paid Off" : "Received"}
-              value={summary.totalPaid}
-              icon="checkmark-done-outline"
-            />
-            <StatCard
-              label="Total Repayable"
-              value={summary.totalRepayable}
-              icon="wallet-outline"
-            />
-          </View>
-
-          {/* Health Counts */}
-          <View className="bg-white rounded-xl p-4 mt-3 mb-4">
-            <Text className="text-sm font-semibold text-navy mb-3">
-              Loan Health
-            </Text>
-            <View className="flex-row justify-between">
-              <CountChip
-                label="Active"
-                value={summary.active}
-                color={Colors.teal}
-              />
-              <CountChip
-                label="Completed"
-                value={summary.completed}
-                color={Colors.paid}
-              />
-              <CountChip
-                label="Overdue"
-                value={overduePayments.length}
-                color={Colors.overdue}
-              />
+        {/* ── Overdue Alert ─────────────────────────────────────────────── */}
+        {overduePayments.length > 0 ? (
+          <View className="bg-red-50 border border-overdue rounded-xl p-4 mb-4 flex-row items-center">
+            <Ionicons name="alert-circle" size={24} color={Colors.overdue} />
+            <View className="flex-1 ml-3">
+              <Text className="text-overdue font-semibold">
+                {overduePayments.length} overdue payment
+                {overduePayments.length === 1 ? "" : "s"}
+              </Text>
+              <Text className="text-overdue text-xs mt-0.5">
+                {formatCurrency(overdueAmount)} past due
+              </Text>
             </View>
           </View>
+        ) : null}
 
-          {/* Overdue Alert */}
-          {overduePayments.length > 0 ? (
-            <View className="bg-red-50 border border-overdue rounded-xl p-4 mb-4 flex-row items-center">
+        {/* ── Upcoming Payments ─────────────────────────────────────────── */}
+        <View className="bg-white rounded-xl p-4 mb-4">
+          <Text className="text-sm font-semibold text-navy mb-3">
+            Upcoming (next 30 days)
+          </Text>
+
+          {paymentsLoading ? (
+            <View className="py-4">
+              <ActivityIndicator color={Colors.teal} />
+            </View>
+          ) : dueNext30.length === 0 ? (
+            <View className="items-center py-6">
               <Ionicons
-                name="alert-circle"
-                size={24}
-                color={Colors.overdue}
+                name="calendar-clear-outline"
+                size={32}
+                color={Colors.muted}
               />
-              <View className="flex-1 ml-3">
-                <Text className="text-overdue font-semibold">
-                  {overduePayments.length} overdue payment
-                  {overduePayments.length === 1 ? "" : "s"}
-                </Text>
-                <Text className="text-overdue text-xs mt-0.5">
-                  {formatCurrency(overdueAmount)} past due
-                </Text>
-              </View>
+              <Text className="text-muted text-sm mt-2">
+                No payments due in the next 30 days
+              </Text>
             </View>
-          ) : null}
-
-          {/* Upcoming Payments */}
-          <View className="bg-white rounded-xl p-4 mb-4">
-            <Text className="text-sm font-semibold text-navy mb-3">
-              Upcoming (next 30 days)
-            </Text>
-
-            {paymentsLoading ? (
-              <View className="py-4">
-                <ActivityIndicator color={Colors.teal} />
-              </View>
-            ) : dueNext30.length === 0 ? (
-              <View className="items-center py-6">
-                <Ionicons
-                  name="calendar-clear-outline"
-                  size={32}
-                  color={Colors.muted}
-                />
-                <Text className="text-muted text-sm mt-2">
-                  No payments due in the next 30 days
+          ) : (
+            dueNext30.slice(0, 5).map((p, idx) => (
+              <Pressable
+                key={p.id}
+                className={`flex-row items-center justify-between py-3 ${
+                  idx > 0 ? "border-t border-gray-100" : ""
+                }`}
+                onPress={() => router.push(`/loan/${p.loan_id}`)}
+              >
+                <View className="flex-1 mr-3">
+                  <Text
+                    className="text-navy font-medium"
+                    numberOfLines={1}
+                  >
+                    {p.customer_name}
+                  </Text>
+                  <Text className="text-muted text-xs mt-0.5">
+                    Due {format(parseISO(p.due_date), "dd MMM yyyy")}
+                  </Text>
+                </View>
+                <Text className="font-semibold" style={{ color: accent }}>
+                  {formatCurrency(p.amount)}
                 </Text>
-              </View>
-            ) : (
-              dueNext30.slice(0, 5).map((p, idx) => (
+              </Pressable>
+            ))
+          )}
+
+          {dueNext30.length > 5 ? (
+            <Text className="text-xs text-muted text-center mt-2">
+              +{dueNext30.length - 5} more
+            </Text>
+          ) : null}
+        </View>
+
+        {/* ── All Loans ─────────────────────────────────────────────────── */}
+        <View className="bg-white rounded-xl p-4">
+          <Text className="text-sm font-semibold text-navy mb-3">
+            All {isCredit ? "Credit" : "Debit"} Loans
+          </Text>
+
+          {allLoans.length === 0 ? (
+            <View className="items-center py-6">
+              <Ionicons
+                name="document-outline"
+                size={28}
+                color={Colors.muted}
+              />
+              <Text className="text-muted text-sm mt-2">
+                No {isCredit ? "credit" : "debit"} loans yet
+              </Text>
+            </View>
+          ) : (
+            allLoans.map((loan, idx) => {
+              const name =
+                customerById.get(loan.customer_id)?.name ?? "Customer";
+              return (
                 <Pressable
-                  key={p.id}
-                  className={`flex-row items-center justify-between py-3 ${
+                  key={loan.id}
+                  className={`py-3 ${
                     idx > 0 ? "border-t border-gray-100" : ""
                   }`}
-                  onPress={() => router.push(`/loan/${p.loan_id}`)}
+                  onPress={() => router.push(`/loan/${loan.id}`)}
                 >
-                  <View className="flex-1 mr-3">
+                  <View className="flex-row justify-between items-center mb-1">
                     <Text
-                      className="text-navy font-medium"
+                      className="text-navy font-medium flex-1 mr-2"
                       numberOfLines={1}
                     >
-                      {p.person_name}
+                      {name}
                     </Text>
-                    <Text className="text-muted text-xs mt-0.5">
-                      Due {format(parseISO(p.due_date), "dd MMM yyyy")}
+                    <Text className="text-sm font-semibold text-navy">
+                      {formatCurrency(loan.principal_amount)}
                     </Text>
                   </View>
-                  <Text className="font-semibold" style={{ color: accent }}>
-                    {formatCurrency(p.amount)}
-                  </Text>
+                  <View className="flex-row justify-between items-center">
+                    <Text className="text-xs text-muted">
+                      {format(parseISO(loan.start_date), "dd MMM yy")} →{" "}
+                      {format(parseISO(loan.due_date), "dd MMM yy")}
+                    </Text>
+                    <Text className="text-xs text-muted">
+                      {loan.rate_of_interest}% / mo
+                    </Text>
+                  </View>
                 </Pressable>
-              ))
-            )}
+              );
+            })
+          )}
+        </View>
+      </ScrollView>
 
-            {dueNext30.length > 5 ? (
-              <Text className="text-xs text-muted text-center mt-2">
-                +{dueNext30.length - 5} more
-              </Text>
-            ) : null}
-          </View>
-        </>
-      ) : null}
-    </ScrollView>
+      {/* ── FAB: New Customer ─────────────────────────────────────────── */}
+      <FAB onPress={() => router.push("/customer/add")} label="Customer" />
+    </View>
   );
 }
 

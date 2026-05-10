@@ -3,9 +3,9 @@
  *
  * Root index route — the first screen expo-router resolves in production.
  * Redirects immediately based on auth state:
- *   • No session  → login
+ *   • No session  → welcome
  *   • Session + PIN required → PIN screen
- *   • Session + no PIN → credit tab
+ *   • Session + no PIN → dashboard
  */
 
 import { Redirect } from "expo-router";
@@ -16,7 +16,6 @@ export default function Index() {
   const loading = useAuthStore((s) => s.loading);
   const pinRequired = useAuthStore((s) => s.pinRequired);
 
-  // While auth is initializing, render nothing (splash screen is still visible)
   if (loading) return null;
 
   if (!user) {
@@ -27,5 +26,5 @@ export default function Index() {
     return <Redirect href="/(auth)/pin" />;
   }
 
-  return <Redirect href="/(tabs)/credit" />;
+  return <Redirect href="/(tabs)/dashboard" />;
 }

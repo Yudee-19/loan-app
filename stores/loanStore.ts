@@ -1,29 +1,33 @@
 /**
  * stores/loanStore.ts
  *
- * Zustand store for loan and payment CRUD.
+ * Zustand store for loan, payment-schedule, and loan-transaction CRUD.
  *
  * Data flow:
- * 1. Screens call store actions (fetchLoans, addLoan, markPaid, etc.).
+ * 1. Screens call store actions (fetch / add / redeem / partial / interest …).
  * 2. Actions talk to Supabase and update local state on success.
- * 3. The `payments` table has a DB trigger (`trg_payment_update`) that
- *    automatically adjusts `loans.total_paid` and `loans.remaining_amount`
- *    when `is_paid` is toggled — so we refetch the parent loan after payment
- *    updates to keep the UI in sync.
+ * 3. Two DB triggers keep `loans.total_paid` and `loans.remaining_amount` in
+ *    sync automatically:
+ *      - `trg_payment_update`         — when a payment row's is_paid flips
+ *      - `trg_loan_transaction_insert` — when a new loan_transaction row lands
+ *    So we always refetch the parent loan after such writes.
  */
 
 import { create } from "zustand";
+import { parseISO } from "date-fns";
+
 import { supabase } from "@/lib/supabase";
-import {
-  calculateBulletPayment,
-  generateBulletPayment,
-} from "@/lib/calculations";
+import { calculateBulletPayment } from "@/lib/calculations";
 import {
   schedulePaymentReminder,
   cancelNotification,
 } from "@/lib/notifications";
-import type { Loan, LoanInsert, Payment } from "@/types";
-import { parseISO } from "date-fns";
+import type {
+  Loan,
+  LoanInsert,
+  Payment,
+  LoanTransaction,
+} from "@/types";
 
 // ─── State Shape ─────────────────────────────────────────────────────────────
 
@@ -36,38 +40,56 @@ interface LoanState {
   currentLoan: Loan | null;
   /** Payments for the currently viewed loan. */
   payments: Payment[];
+  /** Loan_transactions (Redeem / Partial / Interest events) for the current loan. */
+  transactions: LoanTransaction[];
   /** Global loading flag. */
   loading: boolean;
-  /** Per-action loading (e.g. marking a payment). */
+  /** Per-action loading. */
   actionLoading: boolean;
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
-  /** Fetch all loans for the current user, split by type. */
   fetchLoans: () => Promise<void>;
-  /** Fetch a single loan by ID and its payment schedule. */
   fetchLoanDetail: (loanId: string) => Promise<void>;
-  /** Add a new loan + auto-generate payment schedule + schedule notifications. */
   addLoan: (
     data: LoanInsert,
     userId: string,
-    reminderDays: number
-  ) => Promise<void>;
-  /** Update an existing loan. Recalculates unpaid payments if key fields change. */
+    reminderDays: number,
+  ) => Promise<string>;
   updateLoan: (
     loanId: string,
     data: Partial<LoanInsert>,
     userId: string,
-    reminderDays: number
+    reminderDays: number,
   ) => Promise<void>;
-  /** Delete a loan (cascade-deletes payments via FK). */
   deleteLoan: (loanId: string) => Promise<void>;
-  /** Mark a single payment as paid. */
-  markPaymentPaid: (paymentId: string) => Promise<void>;
-  /** Unmark a payment (set back to unpaid). */
-  markPaymentUnpaid: (paymentId: string) => Promise<void>;
+
+  /** Fully redeem a loan: insert a 'redeem' transaction for the remaining balance. */
+  redeemLoan: (loanId: string) => Promise<void>;
+  /** Record a partial principal-side payment of `amount` against the loan. */
+  partialRedemption: (loanId: string, amount: number) => Promise<void>;
+  /** Record the FULL interest of the loan as paid in one shot
+   *  (amount = principal × rate × tenure / 100). */
+  interestPaid: (loanId: string) => Promise<void>;
+  /** Record an arbitrary interest-side payment of `amount` against the loan. */
+  partialInterestPaid: (loanId: string, amount: number) => Promise<void>;
+
   /** Cancel all existing notifications and reschedule with a new reminder window. */
   rescheduleAllNotifications: (reminderDays: number) => Promise<void>;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Look up customer name for notification text. Returns "Customer" on failure. */
+async function fetchCustomerName(customerId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from("customers")
+    .select("name")
+    .eq("id", customerId)
+    .single();
+
+  if (error || !data) return "Customer";
+  return (data as { name: string }).name;
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -77,6 +99,7 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
   debitLoans: [],
   currentLoan: null,
   payments: [],
+  transactions: [],
   loading: false,
   actionLoading: false,
 
@@ -93,8 +116,6 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
       if (error) throw error;
 
       const loans = (data as Loan[]) ?? [];
-
-      // Split into credit (user owes) and debit (user is owed)
       set({
         creditLoans: loans.filter((l) => l.type === "credit"),
         debitLoans: loans.filter((l) => l.type === "debit"),
@@ -104,27 +125,33 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
     }
   },
 
-  // ── Fetch Single Loan + Payments ─────────────────────────────────────────
+  // ── Fetch Single Loan + Payments + Transactions ──────────────────────────
 
   fetchLoanDetail: async (loanId) => {
     set({ loading: true });
     try {
-      // Fetch loan and its payments in parallel
-      const [loanRes, paymentsRes] = await Promise.all([
+      const [loanRes, paymentsRes, txRes] = await Promise.all([
         supabase.from("loans").select("*").eq("id", loanId).single(),
         supabase
           .from("payments")
           .select("*")
           .eq("loan_id", loanId)
           .order("due_date", { ascending: true }),
+        supabase
+          .from("loan_transactions")
+          .select("*")
+          .eq("loan_id", loanId)
+          .order("created_at", { ascending: false }),
       ]);
 
       if (loanRes.error) throw loanRes.error;
       if (paymentsRes.error) throw paymentsRes.error;
+      if (txRes.error) throw txRes.error;
 
       set({
         currentLoan: loanRes.data as Loan,
         payments: (paymentsRes.data as Payment[]) ?? [],
+        transactions: (txRes.data as LoanTransaction[]) ?? [],
       });
     } finally {
       set({ loading: false });
@@ -139,33 +166,33 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
       // 1. Insert the loan row
       const { data: loanData, error: loanError } = await supabase
         .from("loans")
-        .insert({
-          ...data,
-          user_id: userId,
-        })
+        .insert({ ...data, user_id: userId })
         .select()
         .single();
 
       if (loanError) throw loanError;
       const loan = loanData as Loan;
 
-      // 2. Compute the bullet payment total and build a single-row schedule
+      // 2. Compute bullet payment total and build a single-row schedule using
+      //    the loan's admin-set due_date as the deadline.
       const { totalAmount } = calculateBulletPayment(
         data.principal_amount,
         data.rate_of_interest,
         data.tenure_months,
       );
 
-      const schedule = generateBulletPayment(
-        loan.id,
-        userId,
-        parseISO(data.start_date),
-        data.payment_day_of_month,
-        data.tenure_months,
-        totalAmount,
-      );
+      const schedule = [
+        {
+          loan_id: loan.id,
+          user_id: userId,
+          installment_number: 1,
+          due_date: data.due_date,
+          amount: totalAmount,
+          is_paid: false,
+        },
+      ];
 
-      // 3. Bulk-insert all payment rows
+      // 3. Bulk-insert payment rows
       const { data: paymentRows, error: payError } = await supabase
         .from("payments")
         .insert(schedule)
@@ -173,19 +200,18 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
 
       if (payError) throw payError;
 
-      // 4. Schedule local notifications for each payment
-      if (paymentRows) {
+      // 4. Schedule reminder notifications (look up customer name first)
+      if (paymentRows && paymentRows.length > 0) {
+        const personName = await fetchCustomerName(data.customer_id);
         for (const payment of paymentRows as Payment[]) {
           const notifId = await schedulePaymentReminder({
             paymentId: payment.id,
             loanType: data.type,
-            personName: data.person_name,
+            personName,
             amount: payment.amount,
             dueDate: parseISO(payment.due_date),
             reminderDaysBefore: reminderDays,
           });
-
-          // Store the notification ID on the payment row for later cancellation
           if (notifId) {
             await supabase
               .from("payments")
@@ -195,8 +221,9 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
         }
       }
 
-      // 5. Refresh the loan list so the UI updates
+      // 5. Refresh list
       await get().fetchLoans();
+      return loan.id;
     } finally {
       set({ actionLoading: false });
     }
@@ -207,7 +234,6 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
   updateLoan: async (loanId, data, userId, reminderDays) => {
     set({ actionLoading: true });
     try {
-      // 1. Update the loan row itself
       const { error: updateError } = await supabase
         .from("loans")
         .update({
@@ -218,15 +244,15 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
 
       if (updateError) throw updateError;
 
-      // 2. If key financial fields changed, regenerate unpaid payments
-      if (
+      // Regenerate unpaid payments if a financial field changed
+      const scheduleAffected =
         data.principal_amount !== undefined ||
         data.rate_of_interest !== undefined ||
         data.tenure_months !== undefined ||
         data.start_date !== undefined ||
-        data.payment_day_of_month !== undefined
-      ) {
-        // Fetch the updated loan for full values
+        data.payment_day_of_month !== undefined;
+
+      if (scheduleAffected) {
         const { data: freshLoan } = await supabase
           .from("loans")
           .select("*")
@@ -245,21 +271,17 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
 
           if (unpaid) {
             for (const p of unpaid) {
-              if (p.notification_id) {
-                await cancelNotification(p.notification_id);
-              }
+              if (p.notification_id) await cancelNotification(p.notification_id);
             }
           }
 
-          // Delete unpaid payments
           await supabase
             .from("payments")
             .delete()
             .eq("loan_id", loanId)
             .eq("is_paid", false);
 
-          // If the bullet payment hasn't been paid yet, regenerate it.
-          // (Once it's marked paid the loan is `is_completed`; we leave it.)
+          // Only regenerate the bullet if nothing has been paid yet
           const { count } = await supabase
             .from("payments")
             .select("*", { count: "exact", head: true })
@@ -269,34 +291,35 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
           const paidCount = count ?? 0;
 
           if (paidCount === 0) {
-            // Recompute the bullet payment and build a one-row schedule
             const { totalAmount } = calculateBulletPayment(
               loan.principal_amount,
               loan.rate_of_interest,
               loan.tenure_months,
             );
 
-            const schedule = generateBulletPayment(
-              loanId,
-              userId,
-              parseISO(loan.start_date),
-              loan.payment_day_of_month,
-              loan.tenure_months,
-              totalAmount,
-            );
+            const schedule = [
+              {
+                loan_id: loanId,
+                user_id: userId,
+                installment_number: 1,
+                due_date: loan.due_date,
+                amount: totalAmount,
+                is_paid: false,
+              },
+            ];
 
             const { data: newPayments } = await supabase
               .from("payments")
               .insert(schedule)
               .select();
 
-            // Schedule notification for the new payment
-            if (newPayments) {
+            if (newPayments && newPayments.length > 0) {
+              const personName = await fetchCustomerName(loan.customer_id);
               for (const payment of newPayments as Payment[]) {
                 const notifId = await schedulePaymentReminder({
                   paymentId: payment.id,
                   loanType: loan.type,
-                  personName: loan.person_name,
+                  personName,
                   amount: payment.amount,
                   dueDate: parseISO(payment.due_date),
                   reminderDaysBefore: reminderDays,
@@ -311,7 +334,6 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
               }
             }
 
-            // Sync remaining_amount on the loan row
             await supabase
               .from("loans")
               .update({ remaining_amount: totalAmount - loan.total_paid })
@@ -320,7 +342,6 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
         }
       }
 
-      // 3. Refresh data
       await get().fetchLoans();
       await get().fetchLoanDetail(loanId);
     } finally {
@@ -333,7 +354,6 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
   deleteLoan: async (loanId) => {
     set({ actionLoading: true });
     try {
-      // 1. Cancel all scheduled notifications for this loan's payments
       const { data: payments } = await supabase
         .from("payments")
         .select("notification_id")
@@ -341,147 +361,197 @@ export const useLoanStore = create<LoanState>()((set, get) => ({
 
       if (payments) {
         for (const p of payments) {
-          if (p.notification_id) {
-            await cancelNotification(p.notification_id);
-          }
+          if (p.notification_id) await cancelNotification(p.notification_id);
         }
       }
 
-      // 2. Delete the loan (FK cascade removes payments automatically)
-      const { error } = await supabase
-        .from("loans")
-        .delete()
-        .eq("id", loanId);
-
+      const { error } = await supabase.from("loans").delete().eq("id", loanId);
       if (error) throw error;
 
-      // 3. Refresh the loan list
       await get().fetchLoans();
     } finally {
       set({ actionLoading: false });
     }
   },
 
-  // ── Mark Payment Paid ────────────────────────────────────────────────────
+  // ── Redeem Loan ──────────────────────────────────────────────────────────
 
-  markPaymentPaid: async (paymentId) => {
+  redeemLoan: async (loanId) => {
     set({ actionLoading: true });
     try {
-      // 1. Update the payment row
-      const { data, error } = await supabase
-        .from("payments")
-        .update({
-          is_paid: true,
-          paid_at: new Date().toISOString(),
-        })
-        .eq("id", paymentId)
-        .select()
+      // Read the current remaining balance to redeem.
+      const { data: loanRow, error: loanErr } = await supabase
+        .from("loans")
+        .select("user_id, remaining_amount")
+        .eq("id", loanId)
         .single();
+
+      if (loanErr) throw loanErr;
+      const remaining = Number((loanRow as any).remaining_amount);
+
+      const { error } = await supabase.from("loan_transactions").insert({
+        loan_id: loanId,
+        user_id: (loanRow as any).user_id,
+        kind: "redeem",
+        amount: remaining,
+      });
 
       if (error) throw error;
 
-      const payment = data as Payment;
+      // Cancel any pending payment reminders for this loan
+      const { data: pending } = await supabase
+        .from("payments")
+        .select("notification_id")
+        .eq("loan_id", loanId)
+        .eq("is_paid", false);
 
-      // 2. Cancel the notification for this payment
-      if (payment.notification_id) {
-        await cancelNotification(payment.notification_id);
+      if (pending) {
+        for (const p of pending) {
+          if (p.notification_id) await cancelNotification(p.notification_id);
+        }
       }
 
-      // 3. Refresh loan detail to reflect updated totals
-      //    (the DB trigger updates loans.total_paid & remaining_amount)
-      if (payment.loan_id) {
-        await get().fetchLoanDetail(payment.loan_id);
-      }
+      await get().fetchLoanDetail(loanId);
+      await get().fetchLoans();
     } finally {
       set({ actionLoading: false });
     }
   },
 
-  // ── Mark Payment Unpaid ──────────────────────────────────────────────────
+  // ── Partial Redemption ───────────────────────────────────────────────────
 
-  markPaymentUnpaid: async (paymentId) => {
+  partialRedemption: async (loanId, amount) => {
     set({ actionLoading: true });
     try {
-      const { data, error } = await supabase
-        .from("payments")
-        .update({
-          is_paid: false,
-          paid_at: null,
-        })
-        .eq("id", paymentId)
-        .select()
+      const { data: loanRow, error: loanErr } = await supabase
+        .from("loans")
+        .select("user_id")
+        .eq("id", loanId)
         .single();
+
+      if (loanErr) throw loanErr;
+
+      const { error } = await supabase.from("loan_transactions").insert({
+        loan_id: loanId,
+        user_id: (loanRow as any).user_id,
+        kind: "partial",
+        amount,
+      });
 
       if (error) throw error;
 
-      const payment = data as Payment;
+      await get().fetchLoanDetail(loanId);
+      await get().fetchLoans();
+    } finally {
+      set({ actionLoading: false });
+    }
+  },
 
-      // Refresh loan detail to reflect reverted totals
-      if (payment.loan_id) {
-        await get().fetchLoanDetail(payment.loan_id);
-      }
+  // ── Interest Paid (FULL interest of the loan, single shot) ──────────────
+
+  interestPaid: async (loanId) => {
+    set({ actionLoading: true });
+    try {
+      const { data: loanRow, error: loanErr } = await supabase
+        .from("loans")
+        .select("user_id, principal_amount, rate_of_interest, tenure_months")
+        .eq("id", loanId)
+        .single();
+
+      if (loanErr) throw loanErr;
+      const row = loanRow as {
+        user_id: string;
+        principal_amount: number;
+        rate_of_interest: number;
+        tenure_months: number;
+      };
+
+      // Full interest of the loan = principal × rate × tenure / 100
+      const { totalInterest } = calculateBulletPayment(
+        row.principal_amount,
+        row.rate_of_interest,
+        row.tenure_months,
+      );
+
+      const { error } = await supabase.from("loan_transactions").insert({
+        loan_id: loanId,
+        user_id: row.user_id,
+        kind: "interest",
+        amount: totalInterest,
+      });
+
+      if (error) throw error;
+
+      await get().fetchLoanDetail(loanId);
+      await get().fetchLoans();
+    } finally {
+      set({ actionLoading: false });
+    }
+  },
+
+  // ── Partial Interest Paid ───────────────────────────────────────────────
+
+  partialInterestPaid: async (loanId, amount) => {
+    set({ actionLoading: true });
+    try {
+      const { data: loanRow, error: loanErr } = await supabase
+        .from("loans")
+        .select("user_id")
+        .eq("id", loanId)
+        .single();
+
+      if (loanErr) throw loanErr;
+
+      const { error } = await supabase.from("loan_transactions").insert({
+        loan_id: loanId,
+        user_id: (loanRow as any).user_id,
+        kind: "partial_interest",
+        amount,
+      });
+
+      if (error) throw error;
+
+      await get().fetchLoanDetail(loanId);
+      await get().fetchLoans();
     } finally {
       set({ actionLoading: false });
     }
   },
 
   // ── Reschedule All Notifications ─────────────────────────────────────────
-  // Called when the user changes the "remind X days before" setting.
-  // Cancels every existing notification and reschedules with the new window.
 
   rescheduleAllNotifications: async (reminderDays) => {
     try {
-      // 1. Fetch all unpaid payments that have a future due date,
-      //    joined with their parent loan for notification text.
+      // Pull unpaid payments + their parent loan's customer in one round-trip.
       const { data: unpaidPayments, error: payErr } = await supabase
         .from("payments")
-        .select("id, loan_id, due_date, amount, notification_id")
+        .select(
+          "id, loan_id, due_date, amount, notification_id, " +
+            "loan:loans!inner(type, customer_id, customer:customers!inner(name))",
+        )
         .eq("is_paid", false);
 
       if (payErr) throw payErr;
       if (!unpaidPayments || unpaidPayments.length === 0) return;
 
-      // 2. Fetch all loans in one query so we can look up type + person_name
-      const loanIds = [...new Set(unpaidPayments.map((p) => p.loan_id))];
-      const { data: loans, error: loanErr } = await supabase
-        .from("loans")
-        .select("id, type, person_name")
-        .in("id", loanIds);
-
-      if (loanErr) throw loanErr;
-
-      // Build a quick lookup: loanId → { type, person_name }
-      const loanMap = new Map<string, { type: "credit" | "debit"; person_name: string }>();
-      if (loans) {
-        for (const loan of loans) {
-          loanMap.set(loan.id, {
-            type: loan.type as "credit" | "debit",
-            person_name: loan.person_name,
-          });
-        }
-      }
-
-      // 3. Cancel old notifications, schedule new ones, update DB rows
-      for (const payment of unpaidPayments) {
-        // Cancel the existing notification if one was scheduled
+      for (const payment of unpaidPayments as any[]) {
         if (payment.notification_id) {
           await cancelNotification(payment.notification_id);
         }
 
-        const loanInfo = loanMap.get(payment.loan_id);
-        if (!loanInfo) continue;
+        const loanType = payment.loan?.type as "credit" | "debit" | undefined;
+        const personName = payment.loan?.customer?.name ?? "Customer";
+        if (!loanType) continue;
 
-        // Schedule a new notification with the updated reminder window
         const newNotifId = await schedulePaymentReminder({
           paymentId: payment.id,
-          loanType: loanInfo.type,
-          personName: loanInfo.person_name,
-          amount: payment.amount,
+          loanType,
+          personName,
+          amount: Number(payment.amount),
           dueDate: parseISO(payment.due_date),
           reminderDaysBefore: reminderDays,
         });
 
-        // Persist the new notification ID (or null if date was in the past)
         await supabase
           .from("payments")
           .update({ notification_id: newNotifId })

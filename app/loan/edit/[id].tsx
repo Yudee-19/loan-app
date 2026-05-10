@@ -3,14 +3,12 @@
  *
  * Edit loan form — pre-fills current loan data and updates on submit.
  *
- * If the user changes principal, rate, or payment_month, the store's
- * `updateLoan` method will:
- * 1. Cancel and delete the existing unpaid bullet payment.
- * 2. Recompute the bullet total.
- * 3. Insert a fresh single-row payment schedule.
- * 4. Reschedule the local notification.
- *
- * The hidden `payment_day_of_month` is preserved from the loan record.
+ * If the admin changes principal, rate, tenure, start_date, or due_date,
+ * `loanStore.updateLoan` will:
+ *   1. Cancel and delete the existing unpaid bullet payment.
+ *   2. Recompute the bullet total.
+ *   3. Insert a fresh single-row payment schedule using loans.due_date.
+ *   4. Reschedule the local notification.
  */
 
 import React, { useEffect, useState } from "react";
@@ -34,6 +32,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { useLoanStore } from "@/stores/loanStore";
 import { useAuthStore } from "@/stores/authStore";
+import { useCustomerStore } from "@/stores/customerStore";
 import { calculateBulletPayment } from "@/lib/calculations";
 import {
   Colors,
@@ -42,11 +41,24 @@ import {
   formatCurrency,
 } from "@/lib/constants";
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function computeDefaultDueDate(start: Date, months: number): Date {
+  const day = Math.min(start.getDate(), MAX_PAYMENT_DAY);
+  return new Date(start.getFullYear(), start.getMonth() + months, day);
+}
+
+function sameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
 // ─── Validation Schema (mirrors add form) ────────────────────────────────────
 
 const editSchema = z.object({
-  person_name: z.string().min(1, "Name is required"),
-  person_phone: z.string().optional(),
   principal_amount: z
     .string()
     .min(1, "Amount is required")
@@ -58,12 +70,12 @@ const editSchema = z.object({
     .transform(Number)
     .pipe(z.number().min(0).max(100, "Rate must be 0–100%")),
   tenure_months: z
-    .number({ invalid_type_error: "Choose a payment month" })
-    .int()
-    .refine((n) => (PAYMENT_MONTH_OPTIONS as readonly number[]).includes(n), {
-      message: "Choose a payment month",
-    }),
+    .number({ invalid_type_error: "Enter a tenure in months" })
+    .int("Whole months only")
+    .positive("Must be at least 1"),
   start_date: z.date({ invalid_type_error: "Pick a start date" }),
+  due_date: z.date({ invalid_type_error: "Pick a due date" }),
+  item_type: z.string().optional(),
   notes: z.string().optional(),
 });
 
@@ -79,80 +91,104 @@ export default function EditLoanScreen() {
   const user = useAuthStore((s) => s.user);
   const settings = useAuthStore((s) => s.settings);
 
+  const fetchCustomerProfile = useCustomerStore((s) => s.fetchCustomerProfile);
+  const customer = useCustomerStore((s) => s.currentCustomer);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [startPickerOpen, setStartPickerOpen] = useState(false);
+  const [duePickerOpen, setDuePickerOpen] = useState(false);
 
-  // Fetch loan data on mount
+  // Custom-tenure input mode and due-date auto-tracking flag.
+  const [customTenureMode, setCustomTenureMode] = useState(false);
+  const [dueDateAuto, setDueDateAuto] = useState(false);
+
   useEffect(() => {
     if (id) fetchLoanDetail(id);
   }, [id]);
+
+  useEffect(() => {
+    if (currentLoan?.customer_id) {
+      fetchCustomerProfile(currentLoan.customer_id);
+    }
+  }, [currentLoan?.customer_id, fetchCustomerProfile]);
 
   const {
     control,
     handleSubmit,
     watch,
+    setValue,
     reset,
     formState: { errors },
   } = useForm<EditFormData>({
     resolver: zodResolver(editSchema),
     defaultValues: {
-      person_name: "",
-      person_phone: "",
       principal_amount: "" as any,
       rate_of_interest: "" as any,
       tenure_months: undefined as any,
       start_date: new Date(),
+      due_date: new Date(),
+      item_type: "",
       notes: "",
     },
   });
 
-  // Pre-fill form when loan data loads
+  // Pre-fill form once loan data loads
   useEffect(() => {
-    if (currentLoan) {
-      // Legacy loans may have tenure_months outside 1–3; clamp to 1 and
-      // let the user pick a valid value before saving.
-      const tenureClamp = (
-        PAYMENT_MONTH_OPTIONS as readonly number[]
-      ).includes(currentLoan.tenure_months)
-        ? currentLoan.tenure_months
-        : 1;
+    if (!currentLoan) return;
 
-      reset({
-        person_name: currentLoan.person_name,
-        person_phone: currentLoan.person_phone ?? "",
-        principal_amount: String(currentLoan.principal_amount) as any,
-        rate_of_interest: String(currentLoan.rate_of_interest) as any,
-        tenure_months: tenureClamp as any,
-        start_date: parseISO(currentLoan.start_date),
-        notes: currentLoan.notes ?? "",
-      });
-    }
+    const isPreset = (
+      PAYMENT_MONTH_OPTIONS as readonly number[]
+    ).includes(currentLoan.tenure_months);
+    setCustomTenureMode(!isPreset);
+
+    reset({
+      principal_amount: String(currentLoan.principal_amount) as any,
+      rate_of_interest: String(currentLoan.rate_of_interest) as any,
+      tenure_months: currentLoan.tenure_months as any,
+      start_date: parseISO(currentLoan.start_date),
+      due_date: parseISO(currentLoan.due_date),
+      item_type: currentLoan.item_type ?? "",
+      notes: currentLoan.notes ?? "",
+    });
+
+    // If the saved due_date matches start + tenure exactly, treat it as auto;
+    // otherwise the admin had overridden it, so keep manual mode.
+    const computedDefault = computeDefaultDueDate(
+      parseISO(currentLoan.start_date),
+      currentLoan.tenure_months,
+    );
+    setDueDateAuto(sameDay(computedDefault, parseISO(currentLoan.due_date)));
   }, [currentLoan]);
 
-  // Live preview
   const watchPrincipal = watch("principal_amount");
   const watchRate = watch("rate_of_interest");
   const watchTenure = watch("tenure_months");
   const watchStartDate = watch("start_date");
+  const watchDueDate = watch("due_date");
+
+  // Auto-sync due date with start + tenure while admin hasn't overridden it
+  useEffect(() => {
+    if (!dueDateAuto) return;
+    const m = Number(watchTenure);
+    if (!watchStartDate || !m || m <= 0) return;
+    const auto = computeDefaultDueDate(watchStartDate, m);
+    if (!watchDueDate || !sameDay(watchDueDate, auto)) {
+      setValue("due_date", auto, { shouldValidate: true });
+    }
+  }, [watchStartDate, watchTenure, dueDateAuto, setValue, watchDueDate]);
 
   const preview = (() => {
     const p = Number(watchPrincipal) || 0;
     const r = Number(watchRate) || 0;
     const m = Number(watchTenure) || 0;
-    if (p > 0 && m > 0 && watchStartDate) {
+    if (p > 0 && m > 0 && watchDueDate) {
       const result = calculateBulletPayment(p, r, m);
-      const dueDate = new Date(
-        watchStartDate.getFullYear(),
-        watchStartDate.getMonth() + m,
-        Math.min(watchStartDate.getDate(), MAX_PAYMENT_DAY),
-      );
-      return { ...result, dueDate };
+      return { ...result, dueDate: watchDueDate };
     }
     return null;
   })();
 
-  /** Form submission handler. */
   const onSubmit = async (data: EditFormData) => {
     if (!user || !id || !currentLoan) return;
     setLoading(true);
@@ -168,19 +204,18 @@ export default function EditLoanScreen() {
       await updateLoan(
         id,
         {
-          person_name: data.person_name,
-          person_phone: data.person_phone || null,
           principal_amount: data.principal_amount,
           rate_of_interest: data.rate_of_interest,
-          // Day-of-month follows the chosen start date (capped at 28)
           payment_day_of_month: Math.min(
             data.start_date.getDate(),
             MAX_PAYMENT_DAY,
           ),
           start_date: format(data.start_date, "yyyy-MM-dd"),
+          due_date: format(data.due_date, "yyyy-MM-dd"),
           tenure_months: data.tenure_months,
           remaining_amount: totalAmount - currentLoan.total_paid,
-          notes: data.notes || null,
+          item_type: data.item_type?.trim() || null,
+          notes: data.notes?.trim() || null,
         },
         user.id,
         settings?.reminder_days_before ?? 1,
@@ -193,8 +228,6 @@ export default function EditLoanScreen() {
       setLoading(false);
     }
   };
-
-  // ── Reusable Field Renderer ──────────────────────────────────────────────
 
   const renderField = (
     name: keyof EditFormData,
@@ -234,8 +267,6 @@ export default function EditLoanScreen() {
     </View>
   );
 
-  // ── Loading State ────────────────────────────────────────────────────────
-
   if (!currentLoan) {
     return (
       <View className="flex-1 justify-center items-center bg-surface">
@@ -243,8 +274,6 @@ export default function EditLoanScreen() {
       </View>
     );
   }
-
-  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <KeyboardAvoidingView
@@ -256,13 +285,17 @@ export default function EditLoanScreen() {
         contentContainerStyle={{ padding: 24 }}
         keyboardShouldPersistTaps="handled"
       >
-        {renderField("person_name", "Person Name", {
-          placeholder: "Who is this loan with?",
-        })}
-        {renderField("person_phone", "Phone Number (optional)", {
-          placeholder: "+91 98765 43210",
-          keyboardType: "phone-pad",
-        })}
+        {/* ── Customer chip (read-only) ───────────────────────────────── */}
+        <View className="flex-row items-center bg-white rounded-xl px-4 py-3 mb-6 border border-gray-200">
+          <Ionicons name="person-circle-outline" size={28} color={Colors.teal} />
+          <View className="flex-1 ml-3">
+            <Text className="text-xs text-muted">For customer</Text>
+            <Text className="text-base font-semibold text-navy" numberOfLines={1}>
+              {customer?.name ?? "Loading…"}
+            </Text>
+          </View>
+        </View>
+
         {renderField("principal_amount", "Principal Amount (₹)", {
           placeholder: "e.g. 50000",
           keyboardType: "numeric",
@@ -272,40 +305,77 @@ export default function EditLoanScreen() {
           keyboardType: "numeric",
         })}
 
-        {/* ── Payment Month Selector ──────────────────────────────────── */}
+        {/* ── Tenure (segmented + Custom) ─────────────────────────────── */}
         <View className="mb-4">
-          <Text className="text-sm font-medium text-navy mb-1">
-            Payment Month
-          </Text>
+          <Text className="text-sm font-medium text-navy mb-1">Tenure</Text>
           <Controller
             control={control}
             name="tenure_months"
-            render={({ field: { onChange, value } }) => (
-              <View className="flex-row gap-2">
-                {PAYMENT_MONTH_OPTIONS.map((m) => {
-                  const selected = value === m;
-                  return (
+            render={({ field: { onChange, value } }) => {
+              return (
+                <>
+                  <View className="flex-row gap-2">
+                    {PAYMENT_MONTH_OPTIONS.map((m) => {
+                      const selected = !customTenureMode && value === m;
+                      return (
+                        <Pressable
+                          key={m}
+                          className={`flex-1 py-3 rounded-xl border items-center ${
+                            selected
+                              ? "bg-teal border-teal"
+                              : "bg-white border-gray-200"
+                          }`}
+                          onPress={() => {
+                            setCustomTenureMode(false);
+                            onChange(m);
+                          }}
+                        >
+                          <Text
+                            className={`font-semibold ${
+                              selected ? "text-white" : "text-navy"
+                            }`}
+                          >
+                            {m} {m === 1 ? "Month" : "Months"}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                     <Pressable
-                      key={m}
                       className={`flex-1 py-3 rounded-xl border items-center ${
-                        selected
+                        customTenureMode
                           ? "bg-teal border-teal"
                           : "bg-white border-gray-200"
                       }`}
-                      onPress={() => onChange(m)}
+                      onPress={() => setCustomTenureMode(true)}
                     >
                       <Text
                         className={`font-semibold ${
-                          selected ? "text-white" : "text-navy"
+                          customTenureMode ? "text-white" : "text-navy"
                         }`}
                       >
-                        {m} {m === 1 ? "Month" : "Months"}
+                        Custom
                       </Text>
                     </Pressable>
-                  );
-                })}
-              </View>
-            )}
+                  </View>
+
+                  {customTenureMode ? (
+                    <View className="mt-3">
+                      <TextInput
+                        className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-navy"
+                        placeholder="Enter months (e.g. 6)"
+                        placeholderTextColor={Colors.muted}
+                        keyboardType="numeric"
+                        value={value !== undefined ? String(value) : ""}
+                        onChangeText={(text) => {
+                          const n = parseInt(text, 10);
+                          onChange(isNaN(n) ? (undefined as any) : n);
+                        }}
+                      />
+                    </View>
+                  ) : null}
+                </>
+              );
+            }}
           />
           {errors.tenure_months ? (
             <Text className="text-overdue text-xs mt-1">
@@ -314,7 +384,7 @@ export default function EditLoanScreen() {
           ) : null}
         </View>
 
-        {/* ── Start Date Picker ───────────────────────────────────────── */}
+        {/* ── Start Date ──────────────────────────────────────────────── */}
         <View className="mb-4">
           <Text className="text-sm font-medium text-navy mb-1">Start Date</Text>
           <Controller
@@ -324,12 +394,10 @@ export default function EditLoanScreen() {
               <>
                 <Pressable
                   className="bg-white border border-gray-200 rounded-xl px-4 py-3 flex-row items-center justify-between"
-                  onPress={() => setPickerOpen(true)}
+                  onPress={() => setStartPickerOpen(true)}
                 >
                   <Text className="text-navy">
-                    {value
-                      ? format(value, "dd MMM yyyy")
-                      : "Pick a start date"}
+                    {value ? format(value, "dd MMM yyyy") : "Pick a start date"}
                   </Text>
                   <Ionicons
                     name="calendar-outline"
@@ -337,23 +405,21 @@ export default function EditLoanScreen() {
                     color={Colors.muted}
                   />
                 </Pressable>
-                {pickerOpen ? (
+                {startPickerOpen ? (
                   <DateTimePicker
                     value={value ?? new Date()}
                     mode="date"
                     display={Platform.OS === "ios" ? "spinner" : "default"}
                     onChange={(event, selected) => {
-                      if (Platform.OS !== "ios") setPickerOpen(false);
-                      if (event.type === "set" && selected) {
-                        onChange(selected);
-                      }
+                      if (Platform.OS !== "ios") setStartPickerOpen(false);
+                      if (event.type === "set" && selected) onChange(selected);
                     }}
                   />
                 ) : null}
-                {Platform.OS === "ios" && pickerOpen ? (
+                {Platform.OS === "ios" && startPickerOpen ? (
                   <Pressable
                     className="bg-teal rounded-xl py-2 mt-2 items-center"
-                    onPress={() => setPickerOpen(false)}
+                    onPress={() => setStartPickerOpen(false)}
                   >
                     <Text className="text-white font-medium">Done</Text>
                   </Pressable>
@@ -367,6 +433,90 @@ export default function EditLoanScreen() {
             </Text>
           ) : null}
         </View>
+
+        {/* ── Due Date ────────────────────────────────────────────────── */}
+        <View className="mb-4">
+          <View className="flex-row justify-between items-center mb-1">
+            <Text className="text-sm font-medium text-navy">Due Date</Text>
+            {!dueDateAuto ? (
+              <Pressable
+                onPress={() => {
+                  setDueDateAuto(true);
+                  const m = Number(watchTenure);
+                  if (watchStartDate && m > 0) {
+                    setValue(
+                      "due_date",
+                      computeDefaultDueDate(watchStartDate, m),
+                      { shouldValidate: true },
+                    );
+                  }
+                }}
+              >
+                <Text className="text-teal text-xs font-medium">
+                  Reset to default
+                </Text>
+              </Pressable>
+            ) : (
+              <Text className="text-xs text-muted">Auto: start + tenure</Text>
+            )}
+          </View>
+          <Controller
+            control={control}
+            name="due_date"
+            render={({ field: { onChange, value } }) => (
+              <>
+                <Pressable
+                  className="bg-white border border-gray-200 rounded-xl px-4 py-3 flex-row items-center justify-between"
+                  onPress={() => setDuePickerOpen(true)}
+                >
+                  <Text className="text-navy">
+                    {value ? format(value, "dd MMM yyyy") : "Pick a due date"}
+                  </Text>
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={Colors.muted}
+                  />
+                </Pressable>
+                {duePickerOpen ? (
+                  <DateTimePicker
+                    value={value ?? new Date()}
+                    mode="date"
+                    display={Platform.OS === "ios" ? "spinner" : "default"}
+                    onChange={(event, selected) => {
+                      if (Platform.OS !== "ios") setDuePickerOpen(false);
+                      if (event.type === "set" && selected) {
+                        setDueDateAuto(false);
+                        onChange(selected);
+                      }
+                    }}
+                  />
+                ) : null}
+                {Platform.OS === "ios" && duePickerOpen ? (
+                  <Pressable
+                    className="bg-teal rounded-xl py-2 mt-2 items-center"
+                    onPress={() => setDuePickerOpen(false)}
+                  >
+                    <Text className="text-white font-medium">Done</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
+          />
+          {errors.due_date ? (
+            <Text className="text-overdue text-xs mt-1">
+              {errors.due_date?.message as string}
+            </Text>
+          ) : null}
+          <Text className="text-xs text-muted mt-1">
+            Last date you'll accept the bullet payment. Doesn't change the
+            tenure.
+          </Text>
+        </View>
+
+        {renderField("item_type", "Mortgage Item (optional)", {
+          placeholder: "e.g. Gold chain, Honda Activa",
+        })}
 
         {renderField("notes", "Notes (optional)", {
           placeholder: "Any additional details...",
@@ -400,14 +550,12 @@ export default function EditLoanScreen() {
           </View>
         ) : null}
 
-        {/* ── Error Banner ──────────────────────────────────────────── */}
         {error ? (
           <View className="bg-red-50 border border-overdue rounded-xl p-3 mb-4">
             <Text className="text-overdue text-sm">{error}</Text>
           </View>
         ) : null}
 
-        {/* ── Submit Button ─────────────────────────────────────────── */}
         <Pressable
           className="bg-teal rounded-xl py-4 items-center"
           onPress={handleSubmit(onSubmit)}
