@@ -34,6 +34,7 @@ import { useLoanStore } from "@/stores/loanStore";
 import { useCustomerStore } from "@/stores/customerStore";
 import { formatCurrency, Colors } from "@/lib/constants";
 import { calculateBulletPayment } from "@/lib/calculations";
+import type { Customer, Loan } from "@/types";
 
 export default function LoanDetailScreen() {
   const router = useRouter();
@@ -115,6 +116,31 @@ export default function LoanDetailScreen() {
     if (!id) return;
     await partialInterestPaid(id, amount);
     setPartialInterestOpen(false);
+  };
+
+  const handleWhatsAppShare = async () => {
+    if (!currentLoan || !customer) return;
+
+    const message = buildShareMessage({
+      loan: currentLoan,
+      customer,
+      totalAmount,
+      totalInterest,
+      interestPaidTotal,
+    });
+    const encoded = encodeURIComponent(message);
+    const whatsappUrl = `whatsapp://send?text=${encoded}`;
+    const webUrl = `https://wa.me/?text=${encoded}`;
+
+    try {
+      const canOpen = await Linking.canOpenURL(whatsappUrl);
+      await Linking.openURL(canOpen ? whatsappUrl : webUrl);
+    } catch {
+      Alert.alert(
+        "WhatsApp Not Available",
+        "Could not open WhatsApp. Make sure it's installed on this device.",
+      );
+    }
   };
 
   // ── Loading State ────────────────────────────────────────────────────────
@@ -342,6 +368,18 @@ export default function LoanDetailScreen() {
           />
         ))}
 
+        {/* ── Share via WhatsApp ──────────────────────────────────────── */}
+        <Pressable
+          className="rounded-xl py-3 flex-row justify-center items-center mx-4 mt-2"
+          style={{ backgroundColor: "#25D366" }}
+          onPress={handleWhatsAppShare}
+        >
+          <Ionicons name="logo-whatsapp" size={18} color="white" />
+          <Text className="text-white font-medium ml-2">
+            Share via WhatsApp
+          </Text>
+        </Pressable>
+
         {/* ── Edit / Delete (admin) ───────────────────────────────────── */}
         <View className="flex-row gap-3 mx-4 mt-2">
           <Pressable
@@ -383,4 +421,56 @@ export default function LoanDetailScreen() {
       />
     </>
   );
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function buildShareMessage(params: {
+  loan: Loan;
+  customer: Customer;
+  totalAmount: number;
+  totalInterest: number;
+  interestPaidTotal: number;
+}): string {
+  const { loan, customer, totalAmount, totalInterest, interestPaidTotal } =
+    params;
+
+  const lines: string[] = [];
+
+  lines.push("*Loan Details*");
+  lines.push("");
+
+  lines.push("*Customer Information*");
+  lines.push(`Name: ${customer.name}`);
+  if (customer.fathers_name)
+    lines.push(`Father's Name: ${customer.fathers_name}`);
+  if (customer.phone) lines.push(`Phone: ${customer.phone}`);
+  if (customer.email) lines.push(`Email: ${customer.email}`);
+  if (customer.address) lines.push(`Address: ${customer.address}`);
+  if (customer.caste) lines.push(`Caste: ${customer.caste}`);
+  lines.push("");
+
+  lines.push("*Loan Information*");
+  lines.push(`Type: ${loan.type === "credit" ? "Loan Taken" : "Loan Given"}`);
+  lines.push(`Principal Amount: ${formatCurrency(loan.principal_amount)}`);
+  lines.push(`Rate of Interest: ${loan.rate_of_interest}% per month`);
+  lines.push(
+    `Tenure: ${loan.tenure_months} ${
+      loan.tenure_months === 1 ? "month" : "months"
+    }`,
+  );
+  lines.push(`Start Date: ${format(parseISO(loan.start_date), "dd MMM yyyy")}`);
+  lines.push(`Due Date: ${format(parseISO(loan.due_date), "dd MMM yyyy")}`);
+  if (loan.item_type) lines.push(`Mortgage Item: ${loan.item_type}`);
+  lines.push("");
+
+  lines.push("*Repayment Status*");
+  lines.push(`Total Interest: ${formatCurrency(totalInterest)}`);
+  lines.push(`Total Repayable: ${formatCurrency(totalAmount)}`);
+  lines.push(`Paid So Far: ${formatCurrency(loan.total_paid)}`);
+  lines.push(`Interest Paid: ${formatCurrency(interestPaidTotal)}`);
+  lines.push(`Remaining: ${formatCurrency(loan.remaining_amount)}`);
+  lines.push(`Status: ${loan.is_completed ? "Completed" : "Active"}`);
+
+  return lines.join("\n");
 }

@@ -51,6 +51,14 @@ export default function CustomerSearchBar({ onSelect, placeholder }: Props) {
     };
   }, [query, open, searchCustomers]);
 
+  // Close dropdown when the keyboard dismisses (i.e. user tapped outside on the
+  // parent ScrollView, which uses keyboardShouldPersistTaps="handled").
+  useEffect(() => {
+    if (!open) return;
+    const sub = Keyboard.addListener("keyboardDidHide", () => setOpen(false));
+    return () => sub.remove();
+  }, [open]);
+
   const handlePick = (id: string) => {
     Keyboard.dismiss();
     setOpen(false);
